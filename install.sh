@@ -90,8 +90,6 @@ fi
 case "$protocol" in
   reality-vision|reality-vision+hysteria2)
     reality_port="$(ask_choice "Reality 监听端口，直接回车自动选择未占用高位端口" "auto")"
-    dest="$(ask_choice "Reality 回落目标 dest" "$dest")"
-    server_name="$(ask_choice "Reality server-name" "$server_name")"
     ;;
 esac
 
