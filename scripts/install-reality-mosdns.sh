@@ -381,15 +381,18 @@ chmod 0755 "$STATE_DIR"
 chmod 0644 "$LOG_FILE"
 
 tmp_dir="$(mktemp -d)"
+MANIFEST_INSTALL_MOSDNS="$OLD_INSTALL_MOSDNS"
+MANIFEST_INSTALL_REALITY="$OLD_INSTALL_REALITY"
+MANIFEST_INSTALL_HYSTERIA="$OLD_INSTALL_HYSTERIA"
 
 quote() {
   printf '%q' "$1"
 }
 
 write_manifest() {
-  local final_install_mosdns="$INSTALL_MOSDNS"
-  local final_install_reality="$INSTALL_REALITY"
-  local final_install_hysteria="$INSTALL_HYSTERIA"
+  local final_install_mosdns="$MANIFEST_INSTALL_MOSDNS"
+  local final_install_reality="$MANIFEST_INSTALL_REALITY"
+  local final_install_hysteria="$MANIFEST_INSTALL_HYSTERIA"
   local final_mosdns_preexisting="$has_mosdns_before"
   local final_xray_preexisting="$has_xray_before"
   local final_hysteria_preexisting="$has_hysteria_before"
@@ -397,10 +400,6 @@ write_manifest() {
   local final_hysteria_port="$HYSTERIA_PORT"
 
   if [ "$OLD_MANIFEST_PRESENT" -eq 1 ]; then
-    [ "$OLD_INSTALL_MOSDNS" != "1" ] || final_install_mosdns=1
-    [ "$OLD_INSTALL_REALITY" != "1" ] || final_install_reality=1
-    [ "$OLD_INSTALL_HYSTERIA" != "1" ] || final_install_hysteria=1
-
     if [ "$OLD_INSTALL_MOSDNS" = "1" ] && [ -n "$OLD_MOSDNS_PREEXISTING" ]; then
       final_mosdns_preexisting="$OLD_MOSDNS_PREEXISTING"
     fi
@@ -433,10 +432,10 @@ write_manifest() {
     final_reality_protocol="hysteria2"
   fi
 
-  if [ "$INSTALL_REALITY" -eq 1 ]; then
+  if [ "$INSTALL_REALITY" -eq 1 ] && [ "$MANIFEST_INSTALL_REALITY" = "1" ]; then
     final_xray_preexisting=0
   fi
-  if [ "$INSTALL_HYSTERIA" -eq 1 ]; then
+  if [ "$INSTALL_HYSTERIA" -eq 1 ] && [ "$MANIFEST_INSTALL_HYSTERIA" = "1" ]; then
     final_hysteria_preexisting=0
   fi
 
@@ -515,6 +514,8 @@ INSTALL_STARTED=1
 if [ "$INSTALL_MOSDNS" -eq 1 ]; then
   log "Installing mosdns from local project."
   bash "$REPO_DIR/scripts/install-debian11.sh"
+  MANIFEST_INSTALL_MOSDNS=1
+  write_manifest
 fi
 
 if [ "$INSTALL_REALITY" -eq 1 ]; then
@@ -531,6 +532,8 @@ if [ "$INSTALL_REALITY" -eq 1 ]; then
 
   log "Running Reality installer: $reality_script"
   bash "$reality_script" "${args[@]}"
+  MANIFEST_INSTALL_REALITY=1
+  write_manifest
 fi
 
 if [ "$INSTALL_HYSTERIA" -eq 1 ]; then
@@ -538,6 +541,8 @@ if [ "$INSTALL_HYSTERIA" -eq 1 ]; then
   [ -z "$HYSTERIA_PORT" ] || hargs+=(--port "$HYSTERIA_PORT")
   log "Running Hysteria2 installer."
   bash "$REPO_DIR/scripts/install-hysteria2.sh" "${hargs[@]}"
+  MANIFEST_INSTALL_HYSTERIA=1
+  write_manifest
 fi
 
 systemctl daemon-reload || true
