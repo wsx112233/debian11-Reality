@@ -126,6 +126,23 @@ sudo ./install.sh uninstall
 sudo ./install.sh --preflight-only
 ```
 
+## 更新已有目录
+
+如果 `/opt/Reality` 已经存在，不要重复 `git clone`。进入目录后更新：
+
+```bash
+cd /opt/Reality
+git pull
+chmod +x install.sh scripts/*.sh
+```
+
+如果上一次安装失败后留下安装清单，先卸载再重新安装：
+
+```bash
+sudo ./install.sh uninstall
+sudo ./install.sh
+```
+
 ## 常用检查
 
 ```bash
@@ -139,6 +156,13 @@ journalctl -u hysteria2 -n 100 --no-pager
 
 dig @127.0.0.1 google.com
 ```
+
+## 失败处理
+
+- mosdns 会先安装并完成启动检查，确认稳定后才继续安装 Reality 或 Hysteria2。
+- mosdns 启动失败时，脚本会输出 `systemctl status mosdns` 和最近的 `journalctl` 日志，并停止后续安装。
+- 如果安装前已有 mosdns 配置或服务，失败时会尝试恢复安装前备份。
+- 如果是新装 mosdns 失败，脚本会停止失败服务并清理 failed 状态，避免 systemd 一直重启刷日志。
 
 ## 安全边界
 

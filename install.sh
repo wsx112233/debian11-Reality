@@ -101,7 +101,7 @@ case "${confirm:-Y}" in
   *) echo "已取消。"; exit 0 ;;
 esac
 
-args=(--protocol "$protocol")
+args=(--yes --protocol "$protocol")
 [ -z "$reality_port" ] || [ "$reality_port" = "auto" ] || args+=(--port "$reality_port")
 case "$protocol" in
   reality-vision|reality-vision+hysteria2)

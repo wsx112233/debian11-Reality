@@ -83,6 +83,17 @@ plugins:
       - exec: $forward_foreign
       - exec: accept
 
+  - tag: route
+    type: sequence
+    args:
+      - matches:
+          - qname &/etc/mosdns/rules/domestic.generated.txt
+        exec: goto query_domestic
+      - matches:
+          - qname &/etc/mosdns/rules/domestic.custom.txt
+        exec: goto query_domestic
+      - exec: goto query_foreign
+
   - tag: main
     type: sequence
     args:
@@ -111,17 +122,6 @@ plugins:
         exec: accept
 
       - exec: goto route
-
-  - tag: route
-    type: sequence
-    args:
-      - matches:
-          - qname &/etc/mosdns/rules/domestic.generated.txt
-        exec: goto query_domestic
-      - matches:
-          - qname &/etc/mosdns/rules/domestic.custom.txt
-        exec: goto query_domestic
-      - exec: goto query_foreign
 
   - tag: udp_server
     type: udp_server
