@@ -15,7 +15,6 @@ REALITY_PORT="${REALITY_PORT:-}"
 REALITY_DEST="${REALITY_DEST:-}"
 REALITY_SERVER_NAME="${REALITY_SERVER_NAME:-}"
 REALITY_SCRIPT_PATH="${REALITY_SCRIPT_PATH:-}"
-DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-standalone}"
 HYSTERIA_PORT="${HYSTERIA_PORT:-}"
 
 INSTALL_MOSDNS=1
@@ -40,7 +39,6 @@ Usage:
   --allow-existing-mosdns       允许复用或更新已有 mosdns。
   --allow-existing-xray         允许复用或更新已有 Xray/Hysteria。
   --reality-script PATH         使用本地 Reality 安装脚本。
-  --deployment VALUE            部署模式，当前项目使用 standalone。
   --preflight-only              只做环境检查，不安装。
   --no-rollback                 安装失败后不自动卸载。
   --rollback-on-failure         安装失败后自动调用卸载脚本。
@@ -104,7 +102,6 @@ while [ "$#" -gt 0 ]; do
     --allow-existing-mosdns) ALLOW_EXISTING_MOSDNS=1 ;;
     --allow-existing-xray) ALLOW_EXISTING_XRAY=1 ;;
     --reality-script) shift; [ "$#" -gt 0 ] || die "Missing value for --reality-script"; REALITY_SCRIPT_PATH="$1" ;;
-    --deployment) shift; [ "$#" -gt 0 ] || die "Missing value for --deployment"; DEPLOYMENT_MODE="$1" ;;
     --preflight-only) PREFLIGHT_ONLY=1 ;;
     --no-rollback) ROLLBACK_ON_FAILURE=0 ;;
     --rollback-on-failure) ROLLBACK_ON_FAILURE=1 ;;
@@ -136,12 +133,6 @@ case "$REALITY_PROTOCOL" in
     INSTALL_HYSTERIA=1
     ;;
   *) die "不支持的协议: $REALITY_PROTOCOL" ;;
-esac
-
-case "$DEPLOYMENT_MODE" in
-  standalone) ;;
-  3x-ui) die "当前项目定位为不使用 3x-ui 部署，请使用 --deployment standalone。" ;;
-  *) die "不支持的部署模式: $DEPLOYMENT_MODE" ;;
 esac
 
 [ "$INSTALL_MOSDNS" -eq 1 ] || [ "$INSTALL_REALITY" -eq 1 ] || [ "$INSTALL_HYSTERIA" -eq 1 ] || die "没有需要安装的组件。"
@@ -273,7 +264,6 @@ fi
 if [ "$YES" -ne 1 ]; then
   cat <<EOF
 即将安装:
-  部署模式: $DEPLOYMENT_MODE
   mosdns:   $INSTALL_MOSDNS
   Reality:  $INSTALL_REALITY
   Hysteria2:$INSTALL_HYSTERIA
@@ -314,7 +304,6 @@ write_manifest() {
     printf 'INSTALL_MOSDNS=%s\n' "$(quote "$INSTALL_MOSDNS")"
     printf 'INSTALL_REALITY=%s\n' "$(quote "$INSTALL_REALITY")"
     printf 'INSTALL_HYSTERIA=%s\n' "$(quote "$INSTALL_HYSTERIA")"
-    printf 'DEPLOYMENT_MODE=%s\n' "$(quote "$DEPLOYMENT_MODE")"
     printf 'MOSDNS_PREEXISTING=%s\n' "$(quote "$has_mosdns_before")"
     printf 'XRAY_PREEXISTING=%s\n' "$(quote "$has_xray_before")"
     printf 'REALITY_INSTALL_URL=%s\n' "$(quote "$REALITY_INSTALL_URL")"

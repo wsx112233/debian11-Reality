@@ -56,16 +56,6 @@ case "$action" in
 esac
 
 echo
-echo "部署模式"
-echo "1) Reality + mosdns，不使用 3x-ui"
-mode="$(ask_choice "请选择部署模式" "1")"
-
-case "$mode" in
-  1) deployment="standalone" ;;
-  *) echo "无效部署模式: $mode" >&2; exit 1 ;;
-esac
-
-echo
 echo "协议"
 echo "1) reality-vision"
 echo "2) hysteria2"
@@ -100,10 +90,10 @@ esac
 
 echo
 echo "即将安装:"
-echo "  部署模式: $deployment"
+echo "  组件:     Reality + mosdns"
 echo "  协议:     $protocol"
-[ -z "$reality_port" ] || echo "  reality:  $reality_port -> $dest / $server_name"
-[ -z "$hysteria_port" ] || echo "  hysteria2:$hysteria_port/udp"
+[ -z "$reality_port" ] || echo "  Reality:  $reality_port -> $dest / $server_name"
+[ -z "$hysteria_port" ] || echo "  Hysteria2:$hysteria_port/udp"
 printf '确认开始安装？[Y/n]: '
 read -r confirm
 case "${confirm:-Y}" in
@@ -111,7 +101,7 @@ case "${confirm:-Y}" in
   *) echo "已取消。"; exit 0 ;;
 esac
 
-args=(--deployment "$deployment" --protocol "$protocol")
+args=(--protocol "$protocol")
 [ -z "$reality_port" ] || [ "$reality_port" = "auto" ] || args+=(--port "$reality_port")
 case "$protocol" in
   reality-vision|reality-vision+hysteria2)
