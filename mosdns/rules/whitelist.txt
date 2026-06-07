@@ -1,0 +1,3 @@
+# Domains here bypass ad blocking, then continue normal domestic/foreign routing.
+# Example:
+# domain:trusted-ad-dependent.example.com

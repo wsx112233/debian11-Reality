@@ -1,0 +1,138 @@
+log:
+  level: info
+  file: "/var/log/mosdns.log"
+
+api:
+  http: "127.0.0.1:9091"
+
+plugins:
+  - tag: hosts
+    type: hosts
+    args:
+      files:
+        - "/etc/mosdns/hosts.txt"
+
+  - tag: cache
+    type: cache
+    args:
+      size: 200000
+      lazy_cache_ttl: 86400
+      lazy_cache_reply_ttl: 30
+      dump_file: "/etc/mosdns/cache.dump"
+      dump_interval: 600
+
+  - tag: forward_domestic
+    type: forward
+    args:
+      concurrent: 4
+      upstreams:
+        - tag: ali_h3_2235
+          addr: "https://dns.alidns.com/dns-query"
+          dial_addr: "223.5.5.5"
+          enable_http3: true
+          idle_timeout: 30
+        - tag: ali_h3_2236
+          addr: "https://dns.alidns.com/dns-query"
+          dial_addr: "223.6.6.6"
+          enable_http3: true
+          idle_timeout: 30
+        - tag: dnspod_h3_112
+          addr: "https://doh.pub/dns-query"
+          dial_addr: "1.12.12.12"
+          enable_http3: true
+          idle_timeout: 30
+        - tag: dnspod_h3_120
+          addr: "https://doh.pub/dns-query"
+          dial_addr: "120.53.53.53"
+          enable_http3: true
+          idle_timeout: 30
+
+  - tag: forward_foreign
+    type: forward
+    args:
+      concurrent: 2
+      upstreams:
+        - tag: cloudflare_h3_1111
+          addr: "https://cloudflare-dns.com/dns-query"
+          dial_addr: "1.1.1.1"
+          enable_http3: true
+          idle_timeout: 30
+        - tag: cloudflare_h3_1001
+          addr: "https://cloudflare-dns.com/dns-query"
+          dial_addr: "1.0.0.1"
+          enable_http3: true
+          idle_timeout: 30
+
+  - tag: block_ads
+    type: sequence
+    args:
+      - exec: "black_hole 0.0.0.0 ::"
+      - matches:
+          - has_resp
+        exec: accept
+      - exec: reject 3
+
+  - tag: query_domestic
+    type: sequence
+    args:
+      - exec: $forward_domestic
+      - exec: accept
+
+  - tag: query_foreign
+    type: sequence
+    args:
+      - exec: $forward_foreign
+      - exec: accept
+
+  - tag: main
+    type: sequence
+    args:
+      - exec: $hosts
+      - matches:
+          - has_resp
+        exec: accept
+
+      - matches:
+          - qname &/etc/mosdns/rules/whitelist.txt
+        exec: goto route
+
+      - matches:
+          - qname &/etc/mosdns/rules/ads.common.txt
+        exec: goto block_ads
+      - matches:
+          - qname &/etc/mosdns/rules/ads.generated.txt
+        exec: goto block_ads
+      - matches:
+          - qname &/etc/mosdns/rules/ads.custom.txt
+        exec: goto block_ads
+
+      - exec: $cache
+      - matches:
+          - has_resp
+        exec: accept
+
+      - exec: goto route
+
+  - tag: route
+    type: sequence
+    args:
+      - matches:
+          - qname &/etc/mosdns/rules/domestic.generated.txt
+        exec: goto query_domestic
+      - matches:
+          - qname &/etc/mosdns/rules/domestic.custom.txt
+        exec: goto query_domestic
+      - exec: goto query_foreign
+
+  - tag: udp_server
+    type: udp_server
+    args:
+      entry: main
+      listen: "127.0.0.1:53"
+
+  - tag: tcp_server
+    type: tcp_server
+    args:
+      entry: main
+      listen: "127.0.0.1:53"
+      idle_timeout: 10

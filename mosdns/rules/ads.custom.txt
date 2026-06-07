@@ -1,0 +1,6 @@
+# Put custom ad/tracker blocks here. This file is not overwritten by update-rules.sh.
+# Supported mosdns domain rules include:
+# full:ads.example.com
+# domain:ads.example.com
+# keyword:adservice
+# regexp:(^|\.)ad[0-9]+\.
