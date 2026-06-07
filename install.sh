@@ -57,7 +57,7 @@ esac
 
 echo
 echo "部署模式"
-echo "1) Reality + mosdns，无 3x-ui"
+echo "1) Reality + mosdns，不使用 3x-ui"
 mode="$(ask_choice "请选择部署模式" "1")"
 
 case "$mode" in
@@ -86,7 +86,7 @@ server_name="www.microsoft.com"
 
 case "$protocol" in
   reality-vision|reality-vision+hysteria2)
-    reality_port="$(ask_choice "Reality 监听端口" "443")"
+    reality_port="$(ask_choice "Reality 监听端口，直接回车自动选择未占用高位端口" "auto")"
     dest="$(ask_choice "Reality 回落目标 dest" "$dest")"
     server_name="$(ask_choice "Reality server-name" "$server_name")"
     ;;
@@ -112,7 +112,12 @@ case "${confirm:-Y}" in
 esac
 
 args=(--deployment "$deployment" --protocol "$protocol")
-[ -z "$reality_port" ] || args+=(--port "$reality_port" --dest "$dest" --server-name "$server_name")
+[ -z "$reality_port" ] || [ "$reality_port" = "auto" ] || args+=(--port "$reality_port")
+case "$protocol" in
+  reality-vision|reality-vision+hysteria2)
+    args+=(--dest "$dest" --server-name "$server_name")
+    ;;
+esac
 [ -z "$hysteria_port" ] || args+=(--hysteria-port "$hysteria_port")
 
 if [ -e /etc/mosdns ] || [ -e /usr/local/bin/mosdns ]; then

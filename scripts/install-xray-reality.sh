@@ -9,7 +9,7 @@ XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
 XRAY_SERVICE="/etc/systemd/system/xray.service"
 
 PROTOCOL="reality"
-PORT="${REALITY_PORT:-443}"
+PORT="${REALITY_PORT:-}"
 DEST="${REALITY_DEST:-www.microsoft.com:443}"
 SERVER_NAME="${REALITY_SERVER_NAME:-www.microsoft.com}"
 FLOW="${REALITY_FLOW:-xtls-rprx-vision}"
@@ -21,7 +21,7 @@ Usage:
 
 Options:
   --protocol reality       Only reality is supported.
-  --port PORT              Listening port. Default: 443.
+  --port PORT              监听端口。未指定时自动选择未占用高位端口。
   --dest HOST:PORT         Reality dest. Default: www.microsoft.com:443.
   --server-name NAME       Reality serverName. Default: www.microsoft.com.
   -h, --help               Show this help.
@@ -56,6 +56,32 @@ done
 
 [ "$(id -u)" -eq 0 ] || die "Run as root."
 [ "$PROTOCOL" = "reality" ] || die "Only --protocol reality is supported by this local installer."
+
+port_is_free() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ! ({ ss -H -ltnp 2>/dev/null || true; ss -H -lunp 2>/dev/null || true; } | awk -v port=":$p" '$5 ~ port "$" { found=1 } END { exit found ? 0 : 1 }')
+  else
+    return 0
+  fi
+}
+
+pick_high_port() {
+  local p
+  for _ in $(seq 1 80); do
+    p="$(od -An -N2 -tu2 /dev/urandom | awk '{ print 20000 + ($1 % 40000) }')"
+    if port_is_free "$p"; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [ -z "$PORT" ] || [ "$PORT" = "auto" ]; then
+  PORT="$(pick_high_port)" || die "Failed to choose a free high port."
+  log "Auto selected Reality port: $PORT"
+fi
 
 case "$PORT" in
   *[!0-9]*|'') die "Invalid port: $PORT" ;;
@@ -210,9 +236,13 @@ systemctl daemon-reload
 systemctl enable --now xray
 systemctl is-active --quiet xray || die "xray service failed to start."
 
-server_ip="$(curl -fsS --connect-timeout 5 --max-time 10 https://api64.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{ print $1 }')"
+server_ip="$(curl -fsS --connect-timeout 5 --max-time 10 https://api6.ipify.org 2>/dev/null || curl -fsS --connect-timeout 5 --max-time 10 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{ print $1 }')"
 server_ip="${server_ip:-YOUR_SERVER_IP}"
-client_link="vless://${uuid}@${server_ip}:${PORT}?encryption=none&flow=${FLOW}&security=reality&sni=${SERVER_NAME}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#Reality"
+link_host="$server_ip"
+case "$server_ip" in
+  *:*) link_host="[$server_ip]" ;;
+esac
+client_link="vless://${uuid}@${link_host}:${PORT}?encryption=none&flow=${FLOW}&security=reality&sni=${SERVER_NAME}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#Reality"
 
 cat >"$XRAY_CONFIG_DIR/client-link.txt" <<EOF
 $client_link

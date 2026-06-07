@@ -3,7 +3,7 @@
 本项目用于在 Debian 11 上部署 `wsx112233/debian11-Reality` 风格的 Reality 代理，并与 mosdns 组合使用。当前定位是：
 
 ```text
-Reality + mosdns，无 3x-ui
+Reality + mosdns，不使用 3x-ui
 ```
 
 默认不会修改 `/etc/resolv.conf`，不会关闭宿主机已有 DNS 服务。mosdns 默认只监听 `127.0.0.1:53`，避免把 VPS 变成公网开放 DNS。
@@ -22,7 +22,7 @@ sudo ./install.sh
 
 ```text
 安装
-Reality + mosdns，无 3x-ui
+Reality + mosdns，不使用 3x-ui
 reality-vision
 ```
 
@@ -57,7 +57,6 @@ hy2://...
 ```bash
 sudo ./install.sh \
   --protocol reality-vision \
-  --port 443 \
   --dest www.microsoft.com:443 \
   --server-name www.microsoft.com
 ```
@@ -67,7 +66,6 @@ sudo ./install.sh \
 ```bash
 sudo ./install.sh \
   --protocol reality-vision \
-  --port 443 \
   --dest www.microsoft.com:443 \
   --server-name www.microsoft.com \
   --allow-existing-mosdns
@@ -86,7 +84,6 @@ sudo ./install.sh \
 ```bash
 sudo ./install.sh \
   --protocol reality-vision+hysteria2 \
-  --port 443 \
   --hysteria-port 8443 \
   --dest www.microsoft.com:443 \
   --server-name www.microsoft.com

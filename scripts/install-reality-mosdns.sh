@@ -140,7 +140,7 @@ esac
 
 case "$DEPLOYMENT_MODE" in
   standalone) ;;
-  3x-ui) die "当前项目定位为无 3x-ui 部署，请使用 --deployment standalone。" ;;
+  3x-ui) die "当前项目定位为不使用 3x-ui 部署，请使用 --deployment standalone。" ;;
   *) die "不支持的部署模式: $DEPLOYMENT_MODE" ;;
 esac
 
