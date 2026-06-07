@@ -108,7 +108,14 @@ sudo ./install.sh \
 Hysteria2 安装后检查 UDP 监听：
 
 ```bash
+systemctl status hysteria2 --no-pager
 ss -lunp | grep hysteria
+```
+
+如果 `systemctl` 显示服务正常，但 `ss` 没有输出，先看日志确认：
+
+```bash
+journalctl -u hysteria2 -n 100 --no-pager
 ```
 
 ## 卸载

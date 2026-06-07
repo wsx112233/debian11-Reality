@@ -160,8 +160,12 @@ systemctl daemon-reload
 systemctl enable --now hysteria2
 systemctl is-active --quiet hysteria2 || die "hysteria2 service failed to start."
 if command -v ss >/dev/null 2>&1; then
-  ss -H -lunp 2>/dev/null | awk -v port=":$PORT" '$5 ~ port "$" { found=1 } END { exit found ? 0 : 1 }' ||
-    die "hysteria2 已启动，但没有检测到 UDP $PORT 监听。"
+  listen_lines="$(ss -H -lunp 2>/dev/null | awk -v port=":$PORT" '$5 ~ port "$" { print }' || true)"
+  if [ -n "$listen_lines" ]; then
+    printf '%s\n' "$listen_lines" >&2
+  else
+    log "hysteria2 服务已启动，但 ss 未显示 UDP $PORT 监听；继续输出客户端链接，请用 systemctl/journalctl 复核。"
+  fi
 fi
 
 server_ip="$(curl -fsS --connect-timeout 5 --max-time 10 https://api6.ipify.org 2>/dev/null || curl -fsS --connect-timeout 5 --max-time 10 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{ print $1 }')"
