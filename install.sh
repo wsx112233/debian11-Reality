@@ -5,18 +5,9 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ "$#" -gt 0 ]; then
   case "$1" in
-    uninstall|remove)
-      shift
-      exec bash "$REPO_DIR/scripts/uninstall-reality-mosdns.sh" "$@"
-      ;;
-    install)
-      shift
-      exec bash "$REPO_DIR/scripts/install-reality-mosdns.sh" "$@"
-      ;;
-    *)
-      exec bash "$REPO_DIR/scripts/install-reality-mosdns.sh" "$@"
-      ;;
+    install) shift ;;
   esac
+  exec bash "$REPO_DIR/scripts/install-reality-mosdns.sh" "$@"
 fi
 
 ask_choice() {
@@ -38,23 +29,6 @@ ask_yes_no() {
 }
 
 echo "Reality + mosdns 安装器"
-echo
-echo "1) 安装"
-echo "2) 卸载"
-action="$(ask_choice "请选择操作，直接回车默认安装" "1")"
-
-case "$action" in
-  2)
-    exec bash "$REPO_DIR/scripts/uninstall-reality-mosdns.sh"
-    ;;
-  1)
-    ;;
-  *)
-    echo "无效操作: $action" >&2
-    exit 1
-    ;;
-esac
-
 echo
 echo "协议"
 echo "1) reality-vision"
