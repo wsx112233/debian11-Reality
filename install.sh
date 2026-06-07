@@ -17,10 +17,6 @@ ask_choice() {
   printf '%s\n' "${answer:-$default}"
 }
 
-service_active() {
-  systemctl is-active --quiet "$1" 2>/dev/null
-}
-
 manifest_has_reality() {
   [ -r /var/lib/reality-mosdns-stack/manifest.env ] || return 1
   (
@@ -40,13 +36,11 @@ manifest_has_hysteria() {
 }
 
 reality_installed() {
-  manifest_has_reality && return 0
-  [ -f /usr/local/etc/xray/client-link.txt ] && service_active xray
+  manifest_has_reality
 }
 
 hysteria_installed() {
-  manifest_has_hysteria && return 0
-  [ -f /etc/hysteria/client-link.txt ] && service_active hysteria2
+  manifest_has_hysteria
 }
 
 echo "Reality + mosdns 安装器"
