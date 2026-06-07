@@ -9,6 +9,7 @@ YES=0
 PURGE_MOSDNS_CONFIG=1
 PURGE_REALITY=1
 PURGE_HYSTERIA=1
+PURGE_REPO_DIR=0
 SELECT_PROTOCOL=""
 
 usage() {
@@ -79,7 +80,7 @@ fi
 
 SELECT_PROTOCOL="${SELECT_PROTOCOL:-all}"
 case "$SELECT_PROTOCOL" in
-  all) ;;
+  all) PURGE_REPO_DIR=1 ;;
   reality|reality-vision) PURGE_HYSTERIA=0; PURGE_MOSDNS_CONFIG=0 ;;
   hysteria2) PURGE_REALITY=0; PURGE_MOSDNS_CONFIG=0 ;;
   reality+hysteria2|reality-vision+hysteria2) PURGE_MOSDNS_CONFIG=0 ;;
@@ -100,6 +101,24 @@ safe_remove() {
   esac
 }
 
+safe_remove_repo_dir() {
+  local dir="${REPO_DIR:-}"
+  [ "$PURGE_REPO_DIR" -eq 1 ] || return 0
+  [ -n "$dir" ] || return 0
+
+  case "$dir" in
+    /opt/*) ;;
+    *) log "Skipping project directory cleanup because REPO_DIR is outside /opt: $dir"; return 0 ;;
+  esac
+
+  [ "$dir" != "/opt" ] && [ "$dir" != "/opt/" ] || die "拒绝删除 /opt 本身。"
+  [ -f "$dir/install.sh" ] || die "拒绝删除项目目录，未找到 $dir/install.sh"
+  [ -f "$dir/scripts/install-reality-mosdns.sh" ] || die "拒绝删除项目目录，未找到 $dir/scripts/install-reality-mosdns.sh"
+
+  log "Removing project directory: $dir"
+  rm -rf -- "$dir"
+}
+
 if [ "$YES" -ne 1 ]; then
   cat <<EOF
 即将卸载 $STACK_NAME。
@@ -113,6 +132,7 @@ if [ "$YES" -ne 1 ]; then
 清理策略:
   - 选择协议: $SELECT_PROTOCOL
   - 安装前已存在的服务不会被删除。
+  - 全部卸载会删除安装目录: ${REPO_DIR:-unknown}
   - 不删除 apt 包，因为它们可能被生产环境其他服务共用。
   - 防火墙和 sysctl 改动无法安全推断，如曾手动调整，请自行复核。
 EOF
@@ -167,11 +187,12 @@ else
   log "Skipping Hysteria2 cleanup because it was preexisting, disabled, or not installed by this stack."
 fi
 
-systemctl daemon-reload || true
-systemctl reset-failed mosdns xray hysteria2 >/dev/null 2>&1 || true
-
+safe_remove_repo_dir
 safe_remove "${GLOBAL_CLI:-/usr/local/bin/reality-mosdns}"
 safe_remove "$MANIFEST"
 rmdir "$STATE_DIR" >/dev/null 2>&1 || true
+
+systemctl daemon-reload || true
+systemctl reset-failed mosdns xray hysteria2 >/dev/null 2>&1 || true
 
 log "Uninstall complete."

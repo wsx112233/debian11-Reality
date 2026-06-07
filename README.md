@@ -130,6 +130,8 @@ sudo reality-mosdns uninstall
 
 只卸载某个协议时默认保留 mosdns。
 
+选择“全部”卸载时，会在安全校验通过后删除安装目录，例如 `/opt/Reality`。只卸载某个协议时不会删除安装目录。
+
 ## 预检
 
 ```bash
