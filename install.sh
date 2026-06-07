@@ -17,17 +17,6 @@ ask_choice() {
   printf '%s\n' "${answer:-$default}"
 }
 
-ask_yes_no() {
-  local prompt="$1" default="$2" answer
-  printf '%s [%s]: ' "$prompt" "$default" >&2
-  read -r answer
-  answer="${answer:-$default}"
-  case "$answer" in
-    y|Y|yes|YES) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 service_active() {
   systemctl is-active --quiet "$1" 2>/dev/null
 }
@@ -110,6 +99,16 @@ reality_port=""
 hysteria_port=""
 dest="www.microsoft.com:443"
 server_name="www.microsoft.com"
+has_existing_mosdns=0
+has_existing_xray=0
+
+if [ -e /etc/mosdns ] || [ -e /usr/local/bin/mosdns ]; then
+  has_existing_mosdns=1
+fi
+
+if [ -e /usr/local/bin/xray ] || [ -e /usr/local/etc/xray ] || [ -e /etc/xray ] || [ -e /usr/local/bin/hysteria2 ] || [ -e /etc/hysteria ]; then
+  has_existing_xray=1
+fi
 
 case "$protocol" in
   reality-vision|reality-vision+hysteria2)
@@ -131,12 +130,9 @@ echo "  组件:     Reality + mosdns"
 echo "  协议:     $protocol"
 [ -z "$reality_port" ] || echo "  Reality:  $reality_port -> $dest / $server_name"
 [ -z "$hysteria_port" ] || echo "  Hysteria2:$hysteria_port/udp"
-printf '确认开始安装？[Y/n]: '
-read -r confirm
-case "${confirm:-Y}" in
-  y|Y|yes|YES) ;;
-  *) echo "已取消。"; exit 0 ;;
-esac
+[ "$has_existing_mosdns" -eq 0 ] || echo "  已有 mosdns: 将复用或更新"
+[ "$has_existing_xray" -eq 0 ] || echo "  已有 Xray/Hysteria: 将复用或更新"
+echo "开始安装。"
 
 args=(--yes --protocol "$protocol")
 [ -z "$reality_port" ] || [ "$reality_port" = "auto" ] || args+=(--port "$reality_port")
@@ -147,16 +143,7 @@ case "$protocol" in
 esac
 [ -z "$hysteria_port" ] || [ "$hysteria_port" = "auto" ] || args+=(--hysteria-port "$hysteria_port")
 
-if [ -e /etc/mosdns ] || [ -e /usr/local/bin/mosdns ]; then
-  if ask_yes_no "检测到已有 mosdns，是否允许本安装器复用或更新它？" "n"; then
-    args+=(--allow-existing-mosdns)
-  fi
-fi
-
-if [ -e /usr/local/bin/xray ] || [ -e /usr/local/etc/xray ] || [ -e /etc/xray ] || [ -e /usr/local/bin/hysteria2 ] || [ -e /etc/hysteria ]; then
-  if ask_yes_no "检测到已有 Xray/Hysteria，是否允许本安装器复用或更新它？" "n"; then
-    args+=(--allow-existing-xray)
-  fi
-fi
+[ "$has_existing_mosdns" -eq 0 ] || args+=(--allow-existing-mosdns)
+[ "$has_existing_xray" -eq 0 ] || args+=(--allow-existing-xray)
 
 exec bash "$REPO_DIR/scripts/install-reality-mosdns.sh" "${args[@]}"
