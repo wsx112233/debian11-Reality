@@ -11,6 +11,7 @@ PURGE_REALITY=1
 PURGE_HYSTERIA=1
 PURGE_REPO_DIR=0
 SELECT_PROTOCOL=""
+LAST_PROTOCOL_UNINSTALL=0
 
 usage() {
   cat <<'USAGE'
@@ -63,28 +64,73 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 if [ -z "$SELECT_PROTOCOL" ] && [ "$YES" -ne 1 ]; then
   echo "选择要卸载的协议"
-  echo "1) 全部"
-  echo "2) reality-vision"
-  echo "3) hysteria2"
-  echo "4) reality-vision + hysteria2"
-  echo "5) 退出"
-  printf '请选择要卸载的协议 [1]: '
-  read -r protocol_answer
-  case "${protocol_answer:-1}" in
-    1) SELECT_PROTOCOL="all" ;;
-    2) SELECT_PROTOCOL="reality-vision" ;;
-    3) SELECT_PROTOCOL="hysteria2" ;;
-    4) SELECT_PROTOCOL="reality-vision+hysteria2" ;;
-    5) echo "已退出。"; exit 0 ;;
-    *) die "无效协议选择: $protocol_answer" ;;
-  esac
+  if [ "${INSTALL_REALITY:-0}" = "1" ] && [ "${INSTALL_HYSTERIA:-0}" = "1" ]; then
+    echo "1) 全部"
+    echo "2) reality-vision"
+    echo "3) hysteria2"
+    echo "4) reality-vision + hysteria2"
+    echo "5) 退出"
+    printf '请选择要卸载的协议 [1]: '
+    read -r protocol_answer
+    case "${protocol_answer:-1}" in
+      1) SELECT_PROTOCOL="all" ;;
+      2) SELECT_PROTOCOL="reality-vision" ;;
+      3) SELECT_PROTOCOL="hysteria2" ;;
+      4) SELECT_PROTOCOL="reality-vision+hysteria2" ;;
+      5) echo "已退出。"; exit 0 ;;
+      *) die "无效协议选择: $protocol_answer" ;;
+    esac
+  elif [ "${INSTALL_REALITY:-0}" = "1" ]; then
+    SELECT_PROTOCOL="reality-vision"
+    echo "仅检测到 reality-vision，将直接卸载。"
+  elif [ "${INSTALL_HYSTERIA:-0}" = "1" ]; then
+    SELECT_PROTOCOL="hysteria2"
+    echo "仅检测到 hysteria2，将直接卸载。"
+  else
+    echo "未记录已安装协议。"
+    echo "1) 清理残留"
+    echo "2) 退出"
+    printf '请选择操作 [1]: '
+    read -r protocol_answer
+    case "${protocol_answer:-1}" in
+      1) SELECT_PROTOCOL="all" ;;
+      2) echo "已退出。"; exit 0 ;;
+      *) die "无效选择: $protocol_answer" ;;
+    esac
+  fi
 fi
 
 SELECT_PROTOCOL="${SELECT_PROTOCOL:-all}"
 case "$SELECT_PROTOCOL" in
+  reality|reality-vision)
+    [ "${INSTALL_HYSTERIA:-0}" = "1" ] || LAST_PROTOCOL_UNINSTALL=1
+    ;;
+  hysteria2)
+    [ "${INSTALL_REALITY:-0}" = "1" ] || LAST_PROTOCOL_UNINSTALL=1
+    ;;
+  reality+hysteria2|reality-vision+hysteria2)
+    LAST_PROTOCOL_UNINSTALL=1
+    ;;
+esac
+
+case "$SELECT_PROTOCOL" in
   all) PURGE_REPO_DIR=1 ;;
-  reality|reality-vision) PURGE_HYSTERIA=0; PURGE_MOSDNS_CONFIG=0 ;;
-  hysteria2) PURGE_REALITY=0; PURGE_MOSDNS_CONFIG=0 ;;
+  reality|reality-vision)
+    PURGE_HYSTERIA=0
+    if [ "$LAST_PROTOCOL_UNINSTALL" -eq 1 ]; then
+      PURGE_REPO_DIR=1
+    else
+      PURGE_MOSDNS_CONFIG=0
+    fi
+    ;;
+  hysteria2)
+    PURGE_REALITY=0
+    if [ "$LAST_PROTOCOL_UNINSTALL" -eq 1 ]; then
+      PURGE_REPO_DIR=1
+    else
+      PURGE_MOSDNS_CONFIG=0
+    fi
+    ;;
   reality+hysteria2|reality-vision+hysteria2) PURGE_MOSDNS_CONFIG=0 ;;
   *) die "不支持的协议: $SELECT_PROTOCOL" ;;
 esac
@@ -187,12 +233,7 @@ if [ "$YES" -ne 1 ]; then
   - 不删除 apt 包，因为它们可能被生产环境其他服务共用。
   - 防火墙和 sysctl 改动无法安全推断，如曾手动调整，请自行复核。
 EOF
-  printf '继续卸载？[y/N] '
-  read -r answer
-  case "$answer" in
-    y|Y|yes|YES) ;;
-    *) die "已取消。" ;;
-  esac
+  echo "开始卸载。"
 fi
 
 if [ "${INSTALL_MOSDNS:-0}" = "1" ] && [ "${MOSDNS_PREEXISTING:-1}" = "0" ]; then

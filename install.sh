@@ -49,51 +49,34 @@ hysteria_installed() {
   [ -f /etc/hysteria/client-link.txt ] && service_active hysteria2
 }
 
-exit_if_protocol_installed() {
-  local selected="$1"
-  case "$selected" in
-    reality-vision)
-      if reality_installed; then
-        echo "检测到 reality-vision 已安装，无需重复安装。"
-        echo "卸载请执行: sudo reality-mosdns uninstall"
-        exit 0
-      fi
-      ;;
-    hysteria2)
-      if hysteria_installed; then
-        echo "检测到 hysteria2 已安装，无需重复安装。"
-        echo "卸载请执行: sudo reality-mosdns uninstall"
-        exit 0
-      fi
-      ;;
-    reality-vision+hysteria2)
-      if reality_installed && hysteria_installed; then
-        echo "检测到 reality-vision + hysteria2 已安装，无需重复安装。"
-        echo "卸载请执行: sudo reality-mosdns uninstall"
-        exit 0
-      fi
-      ;;
-  esac
-}
-
 echo "Reality + mosdns 安装器"
 echo
-echo "协议"
-echo "1) reality-vision"
-echo "2) hysteria2"
-echo "3) reality-vision + hysteria2"
-echo "4) 退出"
-protocol_choice="$(ask_choice "请选择协议" "1")"
+if reality_installed && hysteria_installed; then
+  echo "检测到 reality-vision + hysteria2 已安装，无需重复安装。"
+  echo "卸载请执行: sudo reality-mosdns uninstall"
+  exit 0
+elif reality_installed; then
+  protocol="hysteria2"
+  echo "检测到 reality-vision 已安装，将继续安装 hysteria2。"
+elif hysteria_installed; then
+  protocol="reality-vision"
+  echo "检测到 hysteria2 已安装，将继续安装 reality-vision。"
+else
+  echo "协议"
+  echo "1) reality-vision"
+  echo "2) hysteria2"
+  echo "3) reality-vision + hysteria2"
+  echo "4) 退出"
+  protocol_choice="$(ask_choice "请选择协议" "1")"
 
-case "$protocol_choice" in
-  1) protocol="reality-vision" ;;
-  2) protocol="hysteria2" ;;
-  3) protocol="reality-vision+hysteria2" ;;
-  4) echo "已退出。"; exit 0 ;;
-  *) echo "无效协议: $protocol_choice" >&2; exit 1 ;;
-esac
-
-exit_if_protocol_installed "$protocol"
+  case "$protocol_choice" in
+    1) protocol="reality-vision" ;;
+    2) protocol="hysteria2" ;;
+    3) protocol="reality-vision+hysteria2" ;;
+    4) echo "已退出。"; exit 0 ;;
+    *) echo "无效协议: $protocol_choice" >&2; exit 1 ;;
+  esac
+fi
 
 reality_port=""
 hysteria_port=""
