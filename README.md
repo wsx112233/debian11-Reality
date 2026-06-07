@@ -114,12 +114,6 @@ ss -lunp | grep hysteria
 ## 卸载
 
 ```bash
-sudo ./install.sh uninstall
-```
-
-安装成功后，也可以在任意目录卸载：
-
-```bash
 sudo reality-mosdns uninstall
 ```
 
@@ -155,7 +149,7 @@ chmod +x install.sh scripts/*.sh
 如果上一次安装失败后留下安装清单，先卸载再重新安装：
 
 ```bash
-sudo ./install.sh uninstall
+sudo reality-mosdns uninstall
 sudo ./install.sh
 ```
 
