@@ -257,7 +257,7 @@ EOF
   echo "开始卸载。"
 fi
 
-if [ "${INSTALL_MOSDNS:-0}" = "1" ] && [ "${MOSDNS_PREEXISTING:-1}" = "0" ]; then
+if { [ "${INSTALL_MOSDNS:-0}" = "1" ] || [ "$SELECT_PROTOCOL" = "all" ]; } && [ "${MOSDNS_PREEXISTING:-1}" = "0" ]; then
   log "Removing mosdns service and binaries."
   systemctl disable --now mosdns >/dev/null 2>&1 || true
   safe_remove /etc/systemd/system/mosdns.service
@@ -273,7 +273,7 @@ else
   log "Skipping mosdns cleanup because it was preexisting or not installed by this stack."
 fi
 
-if [ "$PURGE_REALITY" -eq 1 ] && [ "${INSTALL_REALITY:-0}" = "1" ] && [ "${XRAY_PREEXISTING:-1}" = "0" ]; then
+if [ "$PURGE_REALITY" -eq 1 ] && { [ "${INSTALL_REALITY:-0}" = "1" ] || [ "$SELECT_PROTOCOL" = "all" ]; } && [ "${XRAY_PREEXISTING:-1}" = "0" ]; then
   log "Removing Reality/Xray artifacts."
   systemctl disable --now xray >/dev/null 2>&1 || true
   safe_remove /etc/systemd/system/xray.service
@@ -285,7 +285,7 @@ else
   log "Skipping Reality/Xray cleanup because it was preexisting, disabled, or not installed by this stack."
 fi
 
-if [ "$PURGE_HYSTERIA" -eq 1 ] && [ "${INSTALL_HYSTERIA:-0}" = "1" ] && [ "${HYSTERIA_PREEXISTING:-${XRAY_PREEXISTING:-1}}" = "0" ]; then
+if [ "$PURGE_HYSTERIA" -eq 1 ] && { [ "${INSTALL_HYSTERIA:-0}" = "1" ] || [ "$SELECT_PROTOCOL" = "all" ]; } && [ "${HYSTERIA_PREEXISTING:-${XRAY_PREEXISTING:-1}}" = "0" ]; then
   log "Removing Hysteria2 artifacts."
   systemctl disable --now hysteria2 >/dev/null 2>&1 || true
   safe_remove /etc/systemd/system/hysteria2.service
