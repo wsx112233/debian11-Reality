@@ -210,11 +210,17 @@ systemctl daemon-reload
 systemctl enable --now xray
 systemctl is-active --quiet xray || die "xray service failed to start."
 
+server_ip="$(curl -fsS --connect-timeout 5 --max-time 10 https://api64.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{ print $1 }')"
+server_ip="${server_ip:-YOUR_SERVER_IP}"
+client_link="vless://${uuid}@${server_ip}:${PORT}?encryption=none&flow=${FLOW}&security=reality&sni=${SERVER_NAME}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#Reality"
+
 cat >"$XRAY_CONFIG_DIR/client-link.txt" <<EOF
-vless://${uuid}@YOUR_SERVER_IP:${PORT}?encryption=none&flow=${FLOW}&security=reality&sni=${SERVER_NAME}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#Reality
+$client_link
 EOF
 chmod 0600 "$XRAY_CONFIG_DIR/client-link.txt"
 
 log "Xray Reality installed."
-log "Client link template: $XRAY_CONFIG_DIR/client-link.txt"
-log "Replace YOUR_SERVER_IP with your server IP or domain."
+log "Client link saved: $XRAY_CONFIG_DIR/client-link.txt"
+echo
+echo "Nekoray vless://"
+echo "$client_link"

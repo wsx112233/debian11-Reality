@@ -133,8 +133,12 @@ systemctl daemon-reload
 systemctl enable --now hysteria2
 systemctl is-active --quiet hysteria2 || die "hysteria2 service failed to start."
 
+server_ip="$(curl -fsS --connect-timeout 5 --max-time 10 https://api64.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{ print $1 }')"
+server_ip="${server_ip:-YOUR_SERVER_IP}"
+hy2_link="hy2://${password}@${server_ip}:${PORT}?sni=bing.com&insecure=1#Hysteria2"
+
 cat >"$HYSTERIA_DIR/client.txt" <<EOF
-server: YOUR_SERVER_IP:$PORT
+server: $server_ip:$PORT
 auth: $password
 tls:
   sni: bing.com
@@ -142,5 +146,14 @@ tls:
 EOF
 chmod 0600 "$HYSTERIA_DIR/client.txt"
 
+cat >"$HYSTERIA_DIR/client-link.txt" <<EOF
+$hy2_link
+EOF
+chmod 0600 "$HYSTERIA_DIR/client-link.txt"
+
 log "Hysteria2 installed."
-log "Client config template: $HYSTERIA_DIR/client.txt"
+log "Client config saved: $HYSTERIA_DIR/client.txt"
+log "Client link saved: $HYSTERIA_DIR/client-link.txt"
+echo
+echo "Nekoray hy2://"
+echo "$hy2_link"

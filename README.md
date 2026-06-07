@@ -121,9 +121,10 @@ Production-safety defaults:
 - Set `XRAY_ZIP_SHA256=<sha256>` if you want to pin the downloaded Xray archive.
 - Install state is recorded in `/var/lib/reality-mosdns-stack/manifest.env` for uninstall.
 - A lock prevents concurrent install/uninstall runs.
-- If the wrapper fails after changes begin, it runs a best-effort rollback by calling the uninstall script.
+- If the wrapper fails after changes begin, files are kept in place for diagnosis by default; pass `--rollback-on-failure` to auto-run uninstall on failure.
 - Install logs are written to `/var/lib/reality-mosdns-stack/install.log`.
 - The mosdns systemd service uses basic hardening options and installs `/etc/logrotate.d/mosdns`.
+- Generated Nekoray links are printed at the end and saved to `/usr/local/etc/xray/client-link.txt` and `/etc/hysteria/client-link.txt`.
 
 To use a reviewed local copy of another Reality installer instead of the built-in
 local Xray installer:

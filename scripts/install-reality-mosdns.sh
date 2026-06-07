@@ -25,7 +25,7 @@ YES=0
 ALLOW_EXISTING_MOSDNS=0
 ALLOW_EXISTING_XRAY=0
 PREFLIGHT_ONLY=0
-ROLLBACK_ON_FAILURE=1
+ROLLBACK_ON_FAILURE=0
 INSTALL_STARTED=0
 
 usage() {
@@ -43,6 +43,7 @@ Options:
   --deployment VALUE            standalone or 3x-ui. Default: standalone.
   --preflight-only              Run checks only, then exit.
   --no-rollback                 Do not auto-run uninstall when this wrapper fails after changes begin.
+  --rollback-on-failure         Auto-run uninstall when this wrapper fails after changes begin.
   --protocol VALUE              reality-vision, hysteria2, or reality-vision+hysteria2.
   --port PORT                   Port passed to debian11-Reality install.sh.
   --hysteria-port PORT          Hysteria2 UDP listening port. Default: 8443.
@@ -64,6 +65,14 @@ log() {
   if [ -d "$STATE_DIR" ]; then
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line" >>"$LOG_FILE" 2>/dev/null || true
   fi
+}
+
+print_service_diagnostics() {
+  local service="$1"
+  echo >&2
+  echo "Diagnostics for $service:" >&2
+  systemctl status "$service" --no-pager -l >&2 || true
+  journalctl -u "$service" -n 80 --no-pager >&2 || true
 }
 
 die() {
@@ -98,6 +107,7 @@ while [ "$#" -gt 0 ]; do
     --deployment) shift; [ "$#" -gt 0 ] || die "Missing value for --deployment"; DEPLOYMENT_MODE="$1" ;;
     --preflight-only) PREFLIGHT_ONLY=1 ;;
     --no-rollback) ROLLBACK_ON_FAILURE=0 ;;
+    --rollback-on-failure) ROLLBACK_ON_FAILURE=1 ;;
     --protocol) shift; [ "$#" -gt 0 ] || die "Missing value for --protocol"; REALITY_PROTOCOL="$1" ;;
     --port) shift; [ "$#" -gt 0 ] || die "Missing value for --port"; REALITY_PORT="$1" ;;
     --hysteria-port) shift; [ "$#" -gt 0 ] || die "Missing value for --hysteria-port"; HYSTERIA_PORT="$1" ;;
@@ -272,7 +282,7 @@ Safety defaults:
   - mosdns listens on 127.0.0.1:53 only.
   - /etc/resolv.conf is not modified.
   - Existing mosdns/Xray/Hysteria installs are refused unless explicitly allowed.
-  - Failure after changes begin triggers best-effort rollback.
+  - Failure after changes begin keeps files in place for diagnosis unless --rollback-on-failure is set.
   - Installed state is recorded in $MANIFEST for uninstall.
 EOF
   printf 'Continue? [y/N] '
@@ -371,7 +381,10 @@ fi
 systemctl daemon-reload || true
 
 if [ "$INSTALL_MOSDNS" -eq 1 ]; then
-  systemctl is-active --quiet mosdns || die "mosdns service is not active after install."
+  if ! systemctl is-active --quiet mosdns; then
+    print_service_diagnostics mosdns
+    die "mosdns service is not active after install."
+  fi
   if command -v dig >/dev/null 2>&1; then
     dig @127.0.0.1 google.com +tries=1 +time=3 +short >/dev/null || die "mosdns did not answer a test query on 127.0.0.1:53."
   fi
@@ -392,3 +405,10 @@ ROLLBACK_ON_FAILURE=0
 log "Install complete."
 log "Validate DNS: dig @127.0.0.1 google.com"
 log "Uninstall: sudo bash $REPO_DIR/scripts/uninstall-reality-mosdns.sh"
+
+if [ -f /usr/local/etc/xray/client-link.txt ] || [ -f /etc/hysteria/client-link.txt ]; then
+  echo
+  echo "Client links:"
+  [ ! -f /usr/local/etc/xray/client-link.txt ] || cat /usr/local/etc/xray/client-link.txt
+  [ ! -f /etc/hysteria/client-link.txt ] || cat /etc/hysteria/client-link.txt
+fi
