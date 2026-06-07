@@ -69,10 +69,16 @@ project with `wsx112233/debian11-Reality`:
 sudo bash scripts/install-reality-mosdns.sh
 ```
 
+For compatibility with the old root entrypoint, this also works:
+
+```bash
+sudo ./install.sh
+```
+
 Non-interactive example:
 
 ```bash
-sudo bash scripts/install-reality-mosdns.sh \
+sudo ./install.sh \
   --yes \
   --protocol reality \
   --port 443 \
@@ -83,7 +89,7 @@ sudo bash scripts/install-reality-mosdns.sh \
 Run checks without installing:
 
 ```bash
-sudo bash scripts/install-reality-mosdns.sh --preflight-only
+sudo ./install.sh --preflight-only
 ```
 
 Production-safety defaults:
@@ -91,21 +97,20 @@ Production-safety defaults:
 - mosdns still listens on `127.0.0.1:53` only.
 - The wrapper does not edit `/etc/resolv.conf` and does not disable existing DNS services.
 - If mosdns, Xray, or Hysteria files already exist, installation stops unless you explicitly pass `--allow-existing-mosdns` or `--allow-existing-xray`.
-- The upstream Reality installer is downloaded to a temporary file and run as a file, not piped into `bash`.
-- Set `REALITY_SCRIPT_SHA256=<sha256>` if you want to pin the downloaded upstream script.
+- Reality/Xray is installed by the local `scripts/install-xray-reality.sh` script by default.
+- Legacy external Reality installers are still supported with `--reality-script` or `REALITY_INSTALL_URL`, but are not required.
+- Set `XRAY_ZIP_SHA256=<sha256>` if you want to pin the downloaded Xray archive.
 - Install state is recorded in `/var/lib/reality-mosdns-stack/manifest.env` for uninstall.
 - A lock prevents concurrent install/uninstall runs.
 - If the wrapper fails after changes begin, it runs a best-effort rollback by calling the uninstall script.
 - Install logs are written to `/var/lib/reality-mosdns-stack/install.log`.
 - The mosdns systemd service uses basic hardening options and installs `/etc/logrotate.d/mosdns`.
 
-To use a reviewed local copy of the upstream Reality installer instead of
-downloading it at runtime:
+To use a reviewed local copy of another Reality installer instead of the built-in
+local Xray installer:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/install.sh
-sed -n '1,260p' install.sh
-sudo bash scripts/install-reality-mosdns.sh --reality-script ./install.sh
+sudo ./install.sh --reality-script ./legacy-install.sh
 ```
 
 Uninstall:

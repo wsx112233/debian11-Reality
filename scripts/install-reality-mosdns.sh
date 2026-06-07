@@ -8,7 +8,7 @@ LOG_FILE="$STATE_DIR/install.log"
 LOCK_DIR="/var/lock/$STACK_NAME.lock"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-REALITY_INSTALL_URL="${REALITY_INSTALL_URL:-https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/install.sh}"
+REALITY_INSTALL_URL="${REALITY_INSTALL_URL:-}"
 REALITY_SCRIPT_SHA256="${REALITY_SCRIPT_SHA256:-}"
 REALITY_PROTOCOL="${REALITY_PROTOCOL:-reality}"
 REALITY_PORT="${REALITY_PORT:-}"
@@ -46,7 +46,7 @@ Options:
   -h, --help                    Show this help.
 
 Environment:
-  REALITY_INSTALL_URL           Remote install.sh URL.
+  REALITY_INSTALL_URL           Optional legacy remote install.sh URL. Empty uses local Xray Reality installer.
   REALITY_SCRIPT_SHA256         Optional sha256 for the downloaded install.sh.
   MOSDNS_DOWNLOAD_URL           Optional mosdns release mirror URL.
 USAGE
@@ -117,10 +117,12 @@ validate_port() {
 
 validate_port "$REALITY_PORT"
 
-case "$REALITY_INSTALL_URL" in
-  https://*|http://*) ;;
-  *) [ -n "$REALITY_SCRIPT_PATH" ] || die "REALITY_INSTALL_URL must start with http:// or https://." ;;
-esac
+if [ -n "$REALITY_INSTALL_URL" ]; then
+  case "$REALITY_INSTALL_URL" in
+    https://*|http://*) ;;
+    *) [ -n "$REALITY_SCRIPT_PATH" ] || die "REALITY_INSTALL_URL must start with http:// or https://." ;;
+  esac
+fi
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   die "Another $STACK_NAME operation is running, or stale lock exists: $LOCK_DIR"
@@ -151,6 +153,10 @@ fi
 
 if [ "$INSTALL_REALITY" -eq 1 ] && [ -n "$REALITY_SCRIPT_PATH" ] && [ ! -f "$REALITY_SCRIPT_PATH" ]; then
   die "Reality script not found: $REALITY_SCRIPT_PATH"
+fi
+
+if [ "$INSTALL_REALITY" -eq 1 ] && [ -z "$REALITY_SCRIPT_PATH" ] && [ -z "$REALITY_INSTALL_URL" ] && [ ! -f "$REPO_DIR/scripts/install-xray-reality.sh" ]; then
+  die "Missing local Reality installer: $REPO_DIR/scripts/install-xray-reality.sh"
 fi
 
 free_kb="$(awk '/MemAvailable/ { print $2 }' /proc/meminfo 2>/dev/null || printf '0')"
@@ -300,13 +306,18 @@ if [ "$INSTALL_MOSDNS" -eq 1 ]; then
 fi
 
 if [ "$INSTALL_REALITY" -eq 1 ]; then
-  reality_script="$(download_reality_script)"
   args=(--protocol "$REALITY_PROTOCOL")
   [ -z "$REALITY_PORT" ] || args+=(--port "$REALITY_PORT")
   [ -z "$REALITY_DEST" ] || args+=(--dest "$REALITY_DEST")
   [ -z "$REALITY_SERVER_NAME" ] || args+=(--server-name "$REALITY_SERVER_NAME")
 
-  log "Running debian11-Reality installer."
+  if [ -n "$REALITY_SCRIPT_PATH" ] || [ -n "$REALITY_INSTALL_URL" ]; then
+    reality_script="$(download_reality_script)"
+  else
+    reality_script="$REPO_DIR/scripts/install-xray-reality.sh"
+  fi
+
+  log "Running Reality installer: $reality_script"
   bash "$reality_script" "${args[@]}"
 fi
 
