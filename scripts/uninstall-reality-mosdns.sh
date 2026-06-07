@@ -107,13 +107,19 @@ safe_remove_repo_dir() {
   [ -n "$dir" ] || return 0
 
   case "$dir" in
-    /opt/*) ;;
-    *) log "Skipping project directory cleanup because REPO_DIR is outside /opt: $dir"; return 0 ;;
+    /*) ;;
+    *) die "拒绝删除项目目录，REPO_DIR 不是绝对路径: $dir" ;;
   esac
 
-  [ "$dir" != "/opt" ] && [ "$dir" != "/opt/" ] || die "拒绝删除 /opt 本身。"
+  case "$dir" in
+    /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+      die "拒绝删除系统关键目录: $dir"
+      ;;
+  esac
+
   [ -f "$dir/install.sh" ] || die "拒绝删除项目目录，未找到 $dir/install.sh"
   [ -f "$dir/scripts/install-reality-mosdns.sh" ] || die "拒绝删除项目目录，未找到 $dir/scripts/install-reality-mosdns.sh"
+  [ -f "$dir/mosdns/config.yaml" ] || die "拒绝删除项目目录，未找到 $dir/mosdns/config.yaml"
 
   log "Removing project directory: $dir"
   rm -rf -- "$dir"
