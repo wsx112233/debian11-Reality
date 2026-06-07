@@ -67,6 +67,7 @@ if [ -z "$SELECT_PROTOCOL" ] && [ "$YES" -ne 1 ]; then
   echo "2) reality-vision"
   echo "3) hysteria2"
   echo "4) reality-vision + hysteria2"
+  echo "5) 退出"
   printf '请选择要卸载的协议 [1]: '
   read -r protocol_answer
   case "${protocol_answer:-1}" in
@@ -74,6 +75,7 @@ if [ -z "$SELECT_PROTOCOL" ] && [ "$YES" -ne 1 ]; then
     2) SELECT_PROTOCOL="reality-vision" ;;
     3) SELECT_PROTOCOL="hysteria2" ;;
     4) SELECT_PROTOCOL="reality-vision+hysteria2" ;;
+    5) echo "已退出。"; exit 0 ;;
     *) die "无效协议选择: $protocol_answer" ;;
   esac
 fi

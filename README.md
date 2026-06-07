@@ -32,6 +32,7 @@ Reality 监听端口自动选择未占用高位端口
 1) reality-vision
 2) hysteria2
 3) reality-vision + hysteria2
+4) 退出
 ```
 
 安装成功后会输出 Nekoray 可导入链接：
@@ -135,6 +136,7 @@ sudo reality-mosdns uninstall
 2) reality-vision
 3) hysteria2
 4) reality-vision + hysteria2
+5) 退出
 ```
 
 只卸载某个协议时默认保留 mosdns。

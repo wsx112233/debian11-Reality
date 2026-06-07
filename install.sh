@@ -93,12 +93,14 @@ echo "协议"
 echo "1) reality-vision"
 echo "2) hysteria2"
 echo "3) reality-vision + hysteria2"
+echo "4) 退出"
 protocol_choice="$(ask_choice "请选择协议" "1")"
 
 case "$protocol_choice" in
   1) protocol="reality-vision" ;;
   2) protocol="hysteria2" ;;
   3) protocol="reality-vision+hysteria2" ;;
+  4) echo "已退出。"; exit 0 ;;
   *) echo "无效协议: $protocol_choice" >&2; exit 1 ;;
 esac
 
