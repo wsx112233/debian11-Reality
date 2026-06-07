@@ -27,6 +27,17 @@ ALLOW_EXISTING_XRAY=0
 PREFLIGHT_ONLY=0
 ROLLBACK_ON_FAILURE=0
 INSTALL_STARTED=0
+OLD_MANIFEST_PRESENT=0
+OLD_INSTALLED_AT=""
+OLD_REPO_DIR=""
+OLD_INSTALL_MOSDNS=0
+OLD_INSTALL_REALITY=0
+OLD_INSTALL_HYSTERIA=0
+OLD_MOSDNS_PREEXISTING=""
+OLD_XRAY_PREEXISTING=""
+OLD_HYSTERIA_PREEXISTING=""
+OLD_REALITY_PROTOCOL=""
+OLD_HYSTERIA_PORT=""
 
 usage() {
   cat <<'USAGE'
@@ -162,6 +173,61 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   die "Another $STACK_NAME operation is running, or stale lock exists: $LOCK_DIR"
 fi
 
+if [ -f "$MANIFEST" ]; then
+  CURRENT_REPO_DIR="$REPO_DIR"
+  CURRENT_LOG_FILE="$LOG_FILE"
+  CURRENT_GLOBAL_CLI="$GLOBAL_CLI"
+  REQUESTED_REALITY_PROTOCOL="$REALITY_PROTOCOL"
+  REQUESTED_REALITY_INSTALL_URL="$REALITY_INSTALL_URL"
+  REQUESTED_REALITY_SCRIPT_SHA256="$REALITY_SCRIPT_SHA256"
+  REQUESTED_REALITY_PORT="$REALITY_PORT"
+  REQUESTED_REALITY_DEST="$REALITY_DEST"
+  REQUESTED_REALITY_SERVER_NAME="$REALITY_SERVER_NAME"
+  REQUESTED_REALITY_SCRIPT_PATH="$REALITY_SCRIPT_PATH"
+  REQUESTED_HYSTERIA_PORT="$HYSTERIA_PORT"
+  OLD_MANIFEST_PRESENT=1
+  # shellcheck disable=SC1090
+  . "$MANIFEST"
+  OLD_INSTALLED_AT="${INSTALLED_AT:-}"
+  OLD_REPO_DIR="${REPO_DIR:-}"
+  OLD_INSTALL_MOSDNS="${INSTALL_MOSDNS:-0}"
+  OLD_INSTALL_REALITY="${INSTALL_REALITY:-0}"
+  OLD_INSTALL_HYSTERIA="${INSTALL_HYSTERIA:-0}"
+  OLD_MOSDNS_PREEXISTING="${MOSDNS_PREEXISTING:-}"
+  OLD_XRAY_PREEXISTING="${XRAY_PREEXISTING:-}"
+  OLD_HYSTERIA_PREEXISTING="${HYSTERIA_PREEXISTING:-}"
+  OLD_REALITY_PROTOCOL="${REALITY_PROTOCOL:-}"
+  OLD_HYSTERIA_PORT="${HYSTERIA_PORT:-}"
+
+  REPO_DIR="$CURRENT_REPO_DIR"
+  LOG_FILE="$CURRENT_LOG_FILE"
+  GLOBAL_CLI="$CURRENT_GLOBAL_CLI"
+  REALITY_PROTOCOL="$REQUESTED_REALITY_PROTOCOL"
+  REALITY_INSTALL_URL="$REQUESTED_REALITY_INSTALL_URL"
+  REALITY_SCRIPT_SHA256="$REQUESTED_REALITY_SCRIPT_SHA256"
+  REALITY_PORT="$REQUESTED_REALITY_PORT"
+  REALITY_DEST="$REQUESTED_REALITY_DEST"
+  REALITY_SERVER_NAME="$REQUESTED_REALITY_SERVER_NAME"
+  REALITY_SCRIPT_PATH="$REQUESTED_REALITY_SCRIPT_PATH"
+  HYSTERIA_PORT="$REQUESTED_HYSTERIA_PORT"
+
+  INSTALL_MOSDNS=1
+  case "$REALITY_PROTOCOL" in
+    reality|reality-vision)
+      INSTALL_REALITY=1
+      INSTALL_HYSTERIA=0
+      ;;
+    hysteria2)
+      INSTALL_REALITY=0
+      INSTALL_HYSTERIA=1
+      ;;
+    reality+hysteria2|reality-vision+hysteria2)
+      INSTALL_REALITY=1
+      INSTALL_HYSTERIA=1
+      ;;
+  esac
+fi
+
 if [ -r /etc/os-release ]; then
   . /etc/os-release
   if [ "${ID:-}" != "debian" ] || [ "${VERSION_ID:-}" != "11" ]; then
@@ -177,8 +243,18 @@ command -v mktemp >/dev/null 2>&1 || die "mktemp is required."
 command -v install >/dev/null 2>&1 || die "install is required."
 command -v sha256sum >/dev/null 2>&1 || [ -z "$REALITY_SCRIPT_SHA256" ] || die "sha256sum is required when REALITY_SCRIPT_SHA256 is set."
 
-if [ -f "$MANIFEST" ]; then
-  die "发现已有安装清单: $MANIFEST。请先卸载，或检查上一次安装状态。"
+if [ "$OLD_MANIFEST_PRESENT" -eq 1 ]; then
+  [ "$OLD_REPO_DIR" = "$REPO_DIR" ] || die "发现已有安装清单: $MANIFEST，记录的安装目录是 ${OLD_REPO_DIR:-unknown}，当前目录是 $REPO_DIR。请使用 sudo reality-mosdns uninstall 处理。"
+
+  if [ "$INSTALL_REALITY" -eq 1 ] && [ "$OLD_INSTALL_REALITY" = "1" ]; then
+    INSTALL_REALITY=0
+  fi
+  if [ "$INSTALL_HYSTERIA" -eq 1 ] && [ "$OLD_INSTALL_HYSTERIA" = "1" ]; then
+    INSTALL_HYSTERIA=0
+  fi
+  if [ "$INSTALL_REALITY" -eq 0 ] && [ "$INSTALL_HYSTERIA" -eq 0 ]; then
+    die "请求的协议已在 manifest 中记录为已安装，无需重复安装。"
+  fi
 fi
 
 if [ "$INSTALL_MOSDNS" -eq 1 ] && [ ! -f "$REPO_DIR/scripts/install-debian11.sh" ]; then
@@ -311,21 +387,68 @@ quote() {
 }
 
 write_manifest() {
+  local final_install_mosdns="$INSTALL_MOSDNS"
+  local final_install_reality="$INSTALL_REALITY"
+  local final_install_hysteria="$INSTALL_HYSTERIA"
+  local final_mosdns_preexisting="$has_mosdns_before"
+  local final_xray_preexisting="$has_xray_before"
+  local final_hysteria_preexisting="$has_hysteria_before"
+  local final_reality_protocol="$REALITY_PROTOCOL"
+  local final_hysteria_port="$HYSTERIA_PORT"
+
+  if [ "$OLD_MANIFEST_PRESENT" -eq 1 ]; then
+    [ "$OLD_INSTALL_MOSDNS" != "1" ] || final_install_mosdns=1
+    [ "$OLD_INSTALL_REALITY" != "1" ] || final_install_reality=1
+    [ "$OLD_INSTALL_HYSTERIA" != "1" ] || final_install_hysteria=1
+
+    if [ "$OLD_INSTALL_MOSDNS" = "1" ] && [ -n "$OLD_MOSDNS_PREEXISTING" ]; then
+      final_mosdns_preexisting="$OLD_MOSDNS_PREEXISTING"
+    fi
+    if [ "$OLD_INSTALL_REALITY" = "1" ] && [ -n "$OLD_XRAY_PREEXISTING" ]; then
+      final_xray_preexisting="$OLD_XRAY_PREEXISTING"
+    fi
+    if [ "$OLD_INSTALL_HYSTERIA" = "1" ] && [ -n "$OLD_HYSTERIA_PREEXISTING" ]; then
+      final_hysteria_preexisting="$OLD_HYSTERIA_PREEXISTING"
+    fi
+    if [ -n "$OLD_REALITY_PROTOCOL" ]; then
+      case "$REALITY_PROTOCOL" in
+        reality|reality-vision)
+          final_reality_protocol="$OLD_REALITY_PROTOCOL+reality-vision"
+          ;;
+        hysteria2)
+          final_reality_protocol="$OLD_REALITY_PROTOCOL+hysteria2"
+          ;;
+      esac
+    fi
+    if [ -z "$final_hysteria_port" ] && [ -n "$OLD_HYSTERIA_PORT" ]; then
+      final_hysteria_port="$OLD_HYSTERIA_PORT"
+    fi
+  fi
+
+  if [ "$final_install_reality" = "1" ] && [ "$final_install_hysteria" = "1" ]; then
+    final_reality_protocol="reality-vision+hysteria2"
+  elif [ "$final_install_reality" = "1" ]; then
+    final_reality_protocol="reality-vision"
+  elif [ "$final_install_hysteria" = "1" ]; then
+    final_reality_protocol="hysteria2"
+  fi
+
   {
     printf 'STACK_NAME=%s\n' "$(quote "$STACK_NAME")"
-    printf 'INSTALLED_AT=%s\n' "$(quote "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+    printf 'INSTALLED_AT=%s\n' "$(quote "${OLD_INSTALLED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}")"
+    printf 'UPDATED_AT=%s\n' "$(quote "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
     printf 'REPO_DIR=%s\n' "$(quote "$REPO_DIR")"
     printf 'LOG_FILE=%s\n' "$(quote "$LOG_FILE")"
-    printf 'INSTALL_MOSDNS=%s\n' "$(quote "$INSTALL_MOSDNS")"
-    printf 'INSTALL_REALITY=%s\n' "$(quote "$INSTALL_REALITY")"
-    printf 'INSTALL_HYSTERIA=%s\n' "$(quote "$INSTALL_HYSTERIA")"
-    printf 'MOSDNS_PREEXISTING=%s\n' "$(quote "$has_mosdns_before")"
-    printf 'XRAY_PREEXISTING=%s\n' "$(quote "$has_xray_before")"
-    printf 'HYSTERIA_PREEXISTING=%s\n' "$(quote "$has_hysteria_before")"
+    printf 'INSTALL_MOSDNS=%s\n' "$(quote "$final_install_mosdns")"
+    printf 'INSTALL_REALITY=%s\n' "$(quote "$final_install_reality")"
+    printf 'INSTALL_HYSTERIA=%s\n' "$(quote "$final_install_hysteria")"
+    printf 'MOSDNS_PREEXISTING=%s\n' "$(quote "$final_mosdns_preexisting")"
+    printf 'XRAY_PREEXISTING=%s\n' "$(quote "$final_xray_preexisting")"
+    printf 'HYSTERIA_PREEXISTING=%s\n' "$(quote "$final_hysteria_preexisting")"
     printf 'REALITY_INSTALL_URL=%s\n' "$(quote "$REALITY_INSTALL_URL")"
     printf 'REALITY_SCRIPT_SHA256=%s\n' "$(quote "$REALITY_SCRIPT_SHA256")"
-    printf 'REALITY_PROTOCOL=%s\n' "$(quote "$REALITY_PROTOCOL")"
-    printf 'HYSTERIA_PORT=%s\n' "$(quote "$HYSTERIA_PORT")"
+    printf 'REALITY_PROTOCOL=%s\n' "$(quote "$final_reality_protocol")"
+    printf 'HYSTERIA_PORT=%s\n' "$(quote "$final_hysteria_port")"
     printf 'GLOBAL_CLI=%s\n' "$(quote "$GLOBAL_CLI")"
   } >"$MANIFEST"
   chmod 0644 "$MANIFEST"

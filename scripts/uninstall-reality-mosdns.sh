@@ -62,6 +62,22 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 # shellcheck disable=SC1090
 . "$MANIFEST"
 
+service_known() {
+  systemctl list-unit-files "$1" --no-legend 2>/dev/null | awk 'NF { found=1 } END { exit found ? 0 : 1 }'
+}
+
+if [ "${INSTALL_REALITY:-0}" != "1" ] && [ -f /usr/local/etc/xray/client-link.txt ] && service_known xray.service; then
+  INSTALL_REALITY=1
+  XRAY_PREEXISTING=0
+  log "manifest 未记录 reality-vision，但检测到 Xray 客户端链接和服务，将按已安装处理。"
+fi
+
+if [ "${INSTALL_HYSTERIA:-0}" != "1" ] && [ -f /etc/hysteria/client-link.txt ] && service_known hysteria2.service; then
+  INSTALL_HYSTERIA=1
+  HYSTERIA_PREEXISTING=0
+  log "manifest 未记录 hysteria2，但检测到 Hysteria2 客户端链接和服务，将按已安装处理。"
+fi
+
 if [ -z "$SELECT_PROTOCOL" ] && [ "$YES" -ne 1 ]; then
   echo "选择要卸载的协议"
   if [ "${INSTALL_REALITY:-0}" = "1" ] && [ "${INSTALL_HYSTERIA:-0}" = "1" ]; then
