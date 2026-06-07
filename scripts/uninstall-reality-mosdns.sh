@@ -231,6 +231,11 @@ update_manifest_after_partial_uninstall() {
 }
 
 if [ "$YES" -ne 1 ]; then
+  if [ "$PURGE_REPO_DIR" -eq 1 ]; then
+    repo_cleanup_text="会删除安装目录: ${REPO_DIR:-unknown}"
+  else
+    repo_cleanup_text="不会删除安装目录"
+  fi
   cat <<EOF
 即将卸载 $STACK_NAME。
 
@@ -245,7 +250,7 @@ if [ "$YES" -ne 1 ]; then
 清理策略:
   - 选择协议: $SELECT_PROTOCOL
   - 安装前已存在的服务不会被删除。
-  - 全部卸载会删除安装目录: ${REPO_DIR:-unknown}
+  - 安装目录: $repo_cleanup_text
   - 不删除 apt 包，因为它们可能被生产环境其他服务共用。
   - 防火墙和 sysctl 改动无法安全推断，如曾手动调整，请自行复核。
 EOF

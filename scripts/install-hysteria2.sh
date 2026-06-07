@@ -194,6 +194,3 @@ log "Hysteria2 installed."
 log "Client config saved: $HYSTERIA_DIR/client.txt"
 log "Client link saved: $HYSTERIA_DIR/client-link.txt"
 log "请确认服务器防火墙和云厂商安全组已放行 UDP $PORT。"
-echo
-echo "Nekoray hy2://"
-echo "$hy2_link"

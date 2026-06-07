@@ -251,6 +251,3 @@ chmod 0600 "$XRAY_CONFIG_DIR/client-link.txt"
 
 log "Xray Reality installed."
 log "Client link saved: $XRAY_CONFIG_DIR/client-link.txt"
-echo
-echo "Nekoray vless://"
-echo "$client_link"

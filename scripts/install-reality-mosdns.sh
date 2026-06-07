@@ -433,6 +433,13 @@ write_manifest() {
     final_reality_protocol="hysteria2"
   fi
 
+  if [ "$INSTALL_REALITY" -eq 1 ]; then
+    final_xray_preexisting=0
+  fi
+  if [ "$INSTALL_HYSTERIA" -eq 1 ]; then
+    final_hysteria_preexisting=0
+  fi
+
   {
     printf 'STACK_NAME=%s\n' "$(quote "$STACK_NAME")"
     printf 'INSTALLED_AT=%s\n' "$(quote "${OLD_INSTALLED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}")"
