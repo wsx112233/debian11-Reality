@@ -44,7 +44,7 @@ Usage:
   --rollback-on-failure         安装失败后自动调用卸载脚本。
   --protocol VALUE              reality-vision、hysteria2 或 reality-vision+hysteria2。
   --port PORT                   Reality TCP 监听端口。
-  --hysteria-port PORT          Hysteria2 UDP 监听端口，默认 8443。
+  --hysteria-port PORT          Hysteria2 UDP 监听端口，未指定时自动选择未占用高位端口。
   --dest HOST:PORT              Reality 回落目标。
   --server-name NAME            Reality serverName。
   -h, --help                    显示帮助。
@@ -140,6 +140,7 @@ esac
 validate_port() {
   local value="$1"
   [ -z "$value" ] && return 0
+  [ "$value" = "auto" ] && return 0
   case "$value" in
     *[!0-9]*|'') die "Invalid port: $value" ;;
   esac

@@ -6,16 +6,16 @@ HYSTERIA_DOWNLOAD_URL="${HYSTERIA_DOWNLOAD_URL:-}"
 HYSTERIA_BIN="${HYSTERIA_BIN:-/usr/local/bin/hysteria2}"
 HYSTERIA_DIR="${HYSTERIA_DIR:-/etc/hysteria}"
 HYSTERIA_SERVICE="/etc/systemd/system/hysteria2.service"
-PORT="${HYSTERIA_PORT:-8443}"
+PORT="${HYSTERIA_PORT:-}"
 
 usage() {
   cat <<'USAGE'
 Usage:
   sudo bash scripts/install-hysteria2.sh [options]
 
-Options:
-  --port PORT       UDP listening port. Default: 8443.
-  -h, --help        Show this help.
+选项:
+  --port PORT       UDP 监听端口。未指定时自动选择未占用高位端口。
+  -h, --help        显示帮助。
 
 Environment:
   HYSTERIA_VERSION       GitHub release tag. Default: app/v2.6.3.
@@ -42,6 +42,33 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || die "Run as root."
+
+udp_port_is_free() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ! (ss -H -lunp 2>/dev/null | awk -v port=":$p" '$5 ~ port "$" { found=1 } END { exit found ? 0 : 1 }')
+  else
+    return 0
+  fi
+}
+
+pick_high_udp_port() {
+  local p
+  for _ in $(seq 1 80); do
+    p="$(od -An -N2 -tu2 /dev/urandom | awk '{ print 20000 + ($1 % 40000) }')"
+    if udp_port_is_free "$p"; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [ -z "$PORT" ] || [ "$PORT" = "auto" ]; then
+  PORT="$(pick_high_udp_port)" || die "Failed to choose a free high UDP port."
+  log "Auto selected Hysteria2 UDP port: $PORT"
+fi
+
 case "$PORT" in
   *[!0-9]*|'') die "Invalid port: $PORT" ;;
 esac

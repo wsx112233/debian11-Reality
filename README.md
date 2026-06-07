@@ -83,8 +83,7 @@ sudo ./install.sh \
 
 ```bash
 sudo ./install.sh \
-  --protocol hysteria2 \
-  --hysteria-port 8443
+  --protocol hysteria2
 ```
 
 同时安装：
@@ -92,9 +91,16 @@ sudo ./install.sh \
 ```bash
 sudo ./install.sh \
   --protocol reality-vision+hysteria2 \
-  --hysteria-port 8443 \
   --dest www.microsoft.com:443 \
   --server-name www.microsoft.com
+```
+
+如需指定 Hysteria2 UDP 端口：
+
+```bash
+sudo ./install.sh \
+  --protocol hysteria2 \
+  --hysteria-port 29187
 ```
 
 ## 卸载

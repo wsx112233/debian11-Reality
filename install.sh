@@ -84,7 +84,7 @@ esac
 
 case "$protocol" in
   hysteria2|reality-vision+hysteria2)
-    hysteria_port="$(ask_choice "Hysteria2 UDP 监听端口" "8443")"
+    hysteria_port="$(ask_choice "Hysteria2 UDP 监听端口，直接回车自动选择未占用高位端口" "auto")"
     ;;
 esac
 
@@ -108,7 +108,7 @@ case "$protocol" in
     args+=(--dest "$dest" --server-name "$server_name")
     ;;
 esac
-[ -z "$hysteria_port" ] || args+=(--hysteria-port "$hysteria_port")
+[ -z "$hysteria_port" ] || [ "$hysteria_port" = "auto" ] || args+=(--hysteria-port "$hysteria_port")
 
 if [ -e /etc/mosdns ] || [ -e /usr/local/bin/mosdns ]; then
   if ask_yes_no "检测到已有 mosdns，是否允许本安装器复用或更新它？" "n"; then
