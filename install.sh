@@ -21,9 +21,20 @@ fi
 
 ask_choice() {
   local prompt="$1" default="$2" answer
-  printf '%s [%s]: ' "$prompt" "$default"
+  printf '%s [%s]: ' "$prompt" "$default" >&2
   read -r answer
   printf '%s\n' "${answer:-$default}"
+}
+
+ask_yes_no() {
+  local prompt="$1" default="$2" answer
+  printf '%s [%s]: ' "$prompt" "$default" >&2
+  read -r answer
+  answer="${answer:-$default}"
+  case "$answer" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 echo "Reality + mosdns installer"
@@ -105,5 +116,17 @@ esac
 args=(--deployment "$deployment" --protocol "$protocol")
 [ -z "$reality_port" ] || args+=(--port "$reality_port" --dest "$dest" --server-name "$server_name")
 [ -z "$hysteria_port" ] || args+=(--hysteria-port "$hysteria_port")
+
+if [ -e /etc/mosdns ] || [ -e /usr/local/bin/mosdns ]; then
+  if ask_yes_no "Existing mosdns detected. Allow this installer to update/reuse it?" "n"; then
+    args+=(--allow-existing-mosdns)
+  fi
+fi
+
+if [ -e /usr/local/bin/xray ] || [ -e /usr/local/etc/xray ] || [ -e /etc/xray ] || [ -e /usr/local/bin/hysteria2 ] || [ -e /etc/hysteria ]; then
+  if ask_yes_no "Existing Xray/Hysteria detected. Allow this installer to update/reuse it?" "n"; then
+    args+=(--allow-existing-xray)
+  fi
+fi
 
 exec bash "$REPO_DIR/scripts/install-reality-mosdns.sh" "${args[@]}"
