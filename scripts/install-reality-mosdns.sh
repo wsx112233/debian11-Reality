@@ -7,6 +7,7 @@ MANIFEST="$STATE_DIR/manifest.env"
 LOG_FILE="$STATE_DIR/install.log"
 LOCK_DIR="/var/lock/$STACK_NAME.lock"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GLOBAL_CLI="/usr/local/bin/reality-mosdns"
 
 REALITY_INSTALL_URL="${REALITY_INSTALL_URL:-}"
 REALITY_SCRIPT_SHA256="${REALITY_SCRIPT_SHA256:-}"
@@ -311,8 +312,33 @@ write_manifest() {
     printf 'REALITY_SCRIPT_SHA256=%s\n' "$(quote "$REALITY_SCRIPT_SHA256")"
     printf 'REALITY_PROTOCOL=%s\n' "$(quote "$REALITY_PROTOCOL")"
     printf 'HYSTERIA_PORT=%s\n' "$(quote "$HYSTERIA_PORT")"
+    printf 'GLOBAL_CLI=%s\n' "$(quote "$GLOBAL_CLI")"
   } >"$MANIFEST"
   chmod 0644 "$MANIFEST"
+}
+
+install_global_cli() {
+  cat >"$GLOBAL_CLI" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REPO_DIR="$(quote "$REPO_DIR")"
+
+case "\${1:-}" in
+  uninstall|remove)
+    shift
+    exec bash "\$REPO_DIR/scripts/uninstall-reality-mosdns.sh" "\$@"
+    ;;
+  install)
+    shift
+    exec bash "\$REPO_DIR/scripts/install-reality-mosdns.sh" "\$@"
+    ;;
+  *)
+    exec bash "\$REPO_DIR/install.sh" "\$@"
+    ;;
+esac
+EOF
+  chmod 0755 "$GLOBAL_CLI"
 }
 
 download_reality_script() {
@@ -339,6 +365,7 @@ download_reality_script() {
 }
 
 write_manifest
+install_global_cli
 INSTALL_STARTED=1
 
 if [ "$INSTALL_MOSDNS" -eq 1 ]; then
@@ -395,7 +422,7 @@ ROLLBACK_ON_FAILURE=0
 
 log "安装完成。"
 log "DNS 测试命令: dig @127.0.0.1 google.com"
-log "卸载命令: sudo bash $REPO_DIR/scripts/uninstall-reality-mosdns.sh"
+log "卸载命令: sudo reality-mosdns uninstall"
 
 if [ -f /usr/local/etc/xray/client-link.txt ] || [ -f /etc/hysteria/client-link.txt ]; then
   echo

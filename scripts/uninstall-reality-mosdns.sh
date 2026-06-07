@@ -89,7 +89,7 @@ esac
 safe_remove() {
   local p="$1"
   case "$p" in
-    /etc/mosdns|/etc/mosdns/*|/usr/local/bin/mosdns|/usr/local/bin/mosdns-*|/etc/systemd/system/mosdns.service|/etc/logrotate.d/mosdns|/var/log/mosdns.log|/usr/local/bin/xray|/usr/local/etc/xray|/usr/local/etc/xray/*|/etc/xray|/etc/xray/*|/etc/systemd/system/xray.service|/lib/systemd/system/xray.service|/usr/local/bin/hysteria|/usr/local/bin/hysteria2|/etc/hysteria|/etc/hysteria/*|/etc/systemd/system/hysteria2.service|/var/lib/reality-mosdns-stack/manifest.env)
+    /etc/mosdns|/etc/mosdns/*|/usr/local/bin/mosdns|/usr/local/bin/mosdns-*|/usr/local/bin/reality-mosdns|/etc/systemd/system/mosdns.service|/etc/logrotate.d/mosdns|/var/log/mosdns.log|/usr/local/bin/xray|/usr/local/etc/xray|/usr/local/etc/xray/*|/etc/xray|/etc/xray/*|/etc/systemd/system/xray.service|/lib/systemd/system/xray.service|/usr/local/bin/hysteria|/usr/local/bin/hysteria2|/etc/hysteria|/etc/hysteria/*|/etc/systemd/system/hysteria2.service|/var/lib/reality-mosdns-stack/manifest.env)
       if [ -e "$p" ] || [ -L "$p" ]; then
         rm -rf "$p"
       fi
@@ -170,6 +170,7 @@ fi
 systemctl daemon-reload || true
 systemctl reset-failed mosdns xray hysteria2 >/dev/null 2>&1 || true
 
+safe_remove "${GLOBAL_CLI:-/usr/local/bin/reality-mosdns}"
 safe_remove "$MANIFEST"
 rmdir "$STATE_DIR" >/dev/null 2>&1 || true
 
