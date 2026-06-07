@@ -127,6 +127,47 @@ safe_remove_repo_dir() {
   rm -rf -- "$dir"
 }
 
+quote() {
+  printf '%q' "$1"
+}
+
+update_manifest_after_partial_uninstall() {
+  [ "$PURGE_REPO_DIR" -eq 0 ] || return 0
+
+  case "$SELECT_PROTOCOL" in
+    reality|reality-vision)
+      INSTALL_REALITY=0
+      ;;
+    hysteria2)
+      INSTALL_HYSTERIA=0
+      ;;
+    reality+hysteria2|reality-vision+hysteria2)
+      INSTALL_REALITY=0
+      INSTALL_HYSTERIA=0
+      ;;
+  esac
+
+  {
+    printf 'STACK_NAME=%s\n' "$(quote "${STACK_NAME:-reality-mosdns-stack}")"
+    printf 'INSTALLED_AT=%s\n' "$(quote "${INSTALLED_AT:-}")"
+    printf 'UPDATED_AT=%s\n' "$(quote "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+    printf 'REPO_DIR=%s\n' "$(quote "${REPO_DIR:-}")"
+    printf 'LOG_FILE=%s\n' "$(quote "${LOG_FILE:-}")"
+    printf 'INSTALL_MOSDNS=%s\n' "$(quote "${INSTALL_MOSDNS:-0}")"
+    printf 'INSTALL_REALITY=%s\n' "$(quote "${INSTALL_REALITY:-0}")"
+    printf 'INSTALL_HYSTERIA=%s\n' "$(quote "${INSTALL_HYSTERIA:-0}")"
+    printf 'MOSDNS_PREEXISTING=%s\n' "$(quote "${MOSDNS_PREEXISTING:-1}")"
+    printf 'XRAY_PREEXISTING=%s\n' "$(quote "${XRAY_PREEXISTING:-1}")"
+    printf 'HYSTERIA_PREEXISTING=%s\n' "$(quote "${HYSTERIA_PREEXISTING:-${XRAY_PREEXISTING:-1}}")"
+    printf 'REALITY_INSTALL_URL=%s\n' "$(quote "${REALITY_INSTALL_URL:-}")"
+    printf 'REALITY_SCRIPT_SHA256=%s\n' "$(quote "${REALITY_SCRIPT_SHA256:-}")"
+    printf 'REALITY_PROTOCOL=%s\n' "$(quote "${REALITY_PROTOCOL:-}")"
+    printf 'HYSTERIA_PORT=%s\n' "$(quote "${HYSTERIA_PORT:-}")"
+    printf 'GLOBAL_CLI=%s\n' "$(quote "${GLOBAL_CLI:-/usr/local/bin/reality-mosdns}")"
+  } >"$MANIFEST"
+  chmod 0644 "$MANIFEST"
+}
+
 if [ "$YES" -ne 1 ]; then
   cat <<EOF
 即将卸载 $STACK_NAME。
@@ -134,8 +175,10 @@ if [ "$YES" -ne 1 ]; then
 安装记录:
   mosdns 已安装:  ${INSTALL_MOSDNS:-0}
   reality 已安装: ${INSTALL_REALITY:-0}
+  hysteria2 已安装: ${INSTALL_HYSTERIA:-0}
   mosdns 原本存在: ${MOSDNS_PREEXISTING:-unknown}
   xray 原本存在:   ${XRAY_PREEXISTING:-unknown}
+  hysteria 原本存在: ${HYSTERIA_PREEXISTING:-${XRAY_PREEXISTING:-unknown}}
 
 清理策略:
   - 选择协议: $SELECT_PROTOCOL
@@ -169,22 +212,18 @@ else
 fi
 
 if [ "$PURGE_REALITY" -eq 1 ] && [ "${INSTALL_REALITY:-0}" = "1" ] && [ "${XRAY_PREEXISTING:-1}" = "0" ]; then
-  log "Removing common Reality/Xray/Hysteria artifacts created by debian11-Reality."
+  log "Removing Reality/Xray artifacts."
   systemctl disable --now xray >/dev/null 2>&1 || true
-  systemctl disable --now hysteria2 >/dev/null 2>&1 || true
   safe_remove /etc/systemd/system/xray.service
   safe_remove /lib/systemd/system/xray.service
   safe_remove /usr/local/bin/xray
   safe_remove /usr/local/etc/xray
   safe_remove /etc/xray
-  safe_remove /etc/systemd/system/hysteria2.service
-  safe_remove /usr/local/bin/hysteria
-  safe_remove /usr/local/bin/hysteria2
 else
   log "Skipping Reality/Xray cleanup because it was preexisting, disabled, or not installed by this stack."
 fi
 
-if [ "$PURGE_HYSTERIA" -eq 1 ] && [ "${INSTALL_HYSTERIA:-0}" = "1" ] && [ "${XRAY_PREEXISTING:-1}" = "0" ]; then
+if [ "$PURGE_HYSTERIA" -eq 1 ] && [ "${INSTALL_HYSTERIA:-0}" = "1" ] && [ "${HYSTERIA_PREEXISTING:-${XRAY_PREEXISTING:-1}}" = "0" ]; then
   log "Removing Hysteria2 artifacts."
   systemctl disable --now hysteria2 >/dev/null 2>&1 || true
   safe_remove /etc/systemd/system/hysteria2.service
@@ -196,9 +235,13 @@ else
 fi
 
 safe_remove_repo_dir
-safe_remove "${GLOBAL_CLI:-/usr/local/bin/reality-mosdns}"
-safe_remove "$MANIFEST"
-rmdir "$STATE_DIR" >/dev/null 2>&1 || true
+if [ "$PURGE_REPO_DIR" -eq 1 ]; then
+  safe_remove "${GLOBAL_CLI:-/usr/local/bin/reality-mosdns}"
+  safe_remove "$MANIFEST"
+  rmdir "$STATE_DIR" >/dev/null 2>&1 || true
+else
+  update_manifest_after_partial_uninstall
+fi
 
 systemctl daemon-reload || true
 systemctl reset-failed mosdns xray hysteria2 >/dev/null 2>&1 || true

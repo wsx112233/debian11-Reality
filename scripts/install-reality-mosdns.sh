@@ -226,14 +226,23 @@ for p in \
   /usr/local/etc/xray \
   /etc/xray \
   /etc/systemd/system/xray.service \
-  /lib/systemd/system/xray.service \
+  /lib/systemd/system/xray.service
+do
+  if path_exists "$p"; then
+    has_xray_before=1
+    break
+  fi
+done
+
+has_hysteria_before=0
+for p in \
   /etc/systemd/system/hysteria2.service \
   /etc/hysteria \
   /usr/local/bin/hysteria \
   /usr/local/bin/hysteria2
 do
   if path_exists "$p"; then
-    has_xray_before=1
+    has_hysteria_before=1
     break
   fi
 done
@@ -243,7 +252,11 @@ if [ "$INSTALL_MOSDNS" -eq 1 ] && [ "$has_mosdns_before" -eq 1 ] && [ "$ALLOW_EX
 fi
 
 if [ "$INSTALL_REALITY" -eq 1 ] && [ "$has_xray_before" -eq 1 ] && [ "$ALLOW_EXISTING_XRAY" -ne 1 ]; then
-  die "检测到已有 Xray/Hysteria 文件或服务。确认允许复用或更新时，请加 --allow-existing-xray。"
+  die "检测到已有 Xray 文件或服务。确认允许复用或更新时，请加 --allow-existing-xray。"
+fi
+
+if [ "$INSTALL_HYSTERIA" -eq 1 ] && [ "$has_hysteria_before" -eq 1 ] && [ "$ALLOW_EXISTING_XRAY" -ne 1 ]; then
+  die "检测到已有 Hysteria 文件或服务。确认允许复用或更新时，请加 --allow-existing-xray。"
 fi
 
 if [ "$INSTALL_MOSDNS" -eq 1 ] && command -v ss >/dev/null 2>&1; then
@@ -308,6 +321,7 @@ write_manifest() {
     printf 'INSTALL_HYSTERIA=%s\n' "$(quote "$INSTALL_HYSTERIA")"
     printf 'MOSDNS_PREEXISTING=%s\n' "$(quote "$has_mosdns_before")"
     printf 'XRAY_PREEXISTING=%s\n' "$(quote "$has_xray_before")"
+    printf 'HYSTERIA_PREEXISTING=%s\n' "$(quote "$has_hysteria_before")"
     printf 'REALITY_INSTALL_URL=%s\n' "$(quote "$REALITY_INSTALL_URL")"
     printf 'REALITY_SCRIPT_SHA256=%s\n' "$(quote "$REALITY_SCRIPT_SHA256")"
     printf 'REALITY_PROTOCOL=%s\n' "$(quote "$REALITY_PROTOCOL")"
