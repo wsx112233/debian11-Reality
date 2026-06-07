@@ -28,6 +28,65 @@ ask_yes_no() {
   esac
 }
 
+service_active() {
+  systemctl is-active --quiet "$1" 2>/dev/null
+}
+
+manifest_has_reality() {
+  [ -r /var/lib/reality-mosdns-stack/manifest.env ] || return 1
+  (
+    # shellcheck disable=SC1091
+    . /var/lib/reality-mosdns-stack/manifest.env
+    [ "${INSTALL_REALITY:-0}" = "1" ]
+  )
+}
+
+manifest_has_hysteria() {
+  [ -r /var/lib/reality-mosdns-stack/manifest.env ] || return 1
+  (
+    # shellcheck disable=SC1091
+    . /var/lib/reality-mosdns-stack/manifest.env
+    [ "${INSTALL_HYSTERIA:-0}" = "1" ]
+  )
+}
+
+reality_installed() {
+  manifest_has_reality && return 0
+  [ -f /usr/local/etc/xray/client-link.txt ] && service_active xray
+}
+
+hysteria_installed() {
+  manifest_has_hysteria && return 0
+  [ -f /etc/hysteria/client-link.txt ] && service_active hysteria2
+}
+
+exit_if_protocol_installed() {
+  local selected="$1"
+  case "$selected" in
+    reality-vision)
+      if reality_installed; then
+        echo "检测到 reality-vision 已安装，无需重复安装。"
+        echo "卸载请执行: sudo reality-mosdns uninstall"
+        exit 0
+      fi
+      ;;
+    hysteria2)
+      if hysteria_installed; then
+        echo "检测到 hysteria2 已安装，无需重复安装。"
+        echo "卸载请执行: sudo reality-mosdns uninstall"
+        exit 0
+      fi
+      ;;
+    reality-vision+hysteria2)
+      if reality_installed && hysteria_installed; then
+        echo "检测到 reality-vision + hysteria2 已安装，无需重复安装。"
+        echo "卸载请执行: sudo reality-mosdns uninstall"
+        exit 0
+      fi
+      ;;
+  esac
+}
+
 echo "Reality + mosdns 安装器"
 echo
 echo "协议"
@@ -42,6 +101,8 @@ case "$protocol_choice" in
   3) protocol="reality-vision+hysteria2" ;;
   *) echo "无效协议: $protocol_choice" >&2; exit 1 ;;
 esac
+
+exit_if_protocol_installed "$protocol"
 
 reality_port=""
 hysteria_port=""
