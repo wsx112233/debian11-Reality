@@ -75,12 +75,31 @@ For compatibility with the old root entrypoint, this also works:
 sudo ./install.sh
 ```
 
+Running `sudo ./install.sh` without arguments opens an interactive menu:
+
+```text
+1) Install
+2) Uninstall
+
+Deployment mode:
+1) Reality + mosdns without 3x-ui
+2) Reality + mosdns with 3x-ui
+
+Protocol:
+1) reality-vision
+2) hysteria2
+3) reality-vision + hysteria2
+```
+
+Press Enter at each prompt to accept the safest default: install
+`Reality + mosdns without 3x-ui` using `reality-vision`.
+
 Non-interactive example:
 
 ```bash
 sudo ./install.sh \
   --yes \
-  --protocol reality \
+  --protocol reality-vision \
   --port 443 \
   --dest www.microsoft.com:443 \
   --server-name www.microsoft.com
@@ -116,8 +135,11 @@ sudo ./install.sh --reality-script ./legacy-install.sh
 Uninstall:
 
 ```bash
-sudo bash scripts/uninstall-reality-mosdns.sh
+sudo ./install.sh uninstall
 ```
+
+Uninstall also asks which protocol to remove: all, reality-vision, hysteria2, or
+reality-vision + hysteria2. Removing only one protocol keeps mosdns in place.
 
 The uninstall script removes mosdns and common Xray/Hysteria artifacts only when
 the manifest shows they were not present before this wrapper ran. It does not

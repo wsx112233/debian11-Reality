@@ -15,9 +15,12 @@ REALITY_PORT="${REALITY_PORT:-}"
 REALITY_DEST="${REALITY_DEST:-}"
 REALITY_SERVER_NAME="${REALITY_SERVER_NAME:-}"
 REALITY_SCRIPT_PATH="${REALITY_SCRIPT_PATH:-}"
+DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-standalone}"
+HYSTERIA_PORT="${HYSTERIA_PORT:-}"
 
 INSTALL_MOSDNS=1
 INSTALL_REALITY=1
+INSTALL_HYSTERIA=0
 YES=0
 ALLOW_EXISTING_MOSDNS=0
 ALLOW_EXISTING_XRAY=0
@@ -37,10 +40,12 @@ Options:
   --allow-existing-mosdns       Allow installing over an existing /etc/mosdns or mosdns service.
   --allow-existing-xray         Allow running the Reality installer when Xray/Hysteria files already exist.
   --reality-script PATH         Use a local debian11-Reality install.sh instead of downloading it.
+  --deployment VALUE            standalone or 3x-ui. Default: standalone.
   --preflight-only              Run checks only, then exit.
   --no-rollback                 Do not auto-run uninstall when this wrapper fails after changes begin.
-  --protocol VALUE              Protocol passed to debian11-Reality install.sh. Default: reality.
+  --protocol VALUE              reality-vision, hysteria2, or reality-vision+hysteria2.
   --port PORT                   Port passed to debian11-Reality install.sh.
+  --hysteria-port PORT          Hysteria2 UDP listening port. Default: 8443.
   --dest HOST:PORT              dest passed to debian11-Reality install.sh.
   --server-name NAME            server-name passed to debian11-Reality install.sh.
   -h, --help                    Show this help.
@@ -90,10 +95,12 @@ while [ "$#" -gt 0 ]; do
     --allow-existing-mosdns) ALLOW_EXISTING_MOSDNS=1 ;;
     --allow-existing-xray) ALLOW_EXISTING_XRAY=1 ;;
     --reality-script) shift; [ "$#" -gt 0 ] || die "Missing value for --reality-script"; REALITY_SCRIPT_PATH="$1" ;;
+    --deployment) shift; [ "$#" -gt 0 ] || die "Missing value for --deployment"; DEPLOYMENT_MODE="$1" ;;
     --preflight-only) PREFLIGHT_ONLY=1 ;;
     --no-rollback) ROLLBACK_ON_FAILURE=0 ;;
     --protocol) shift; [ "$#" -gt 0 ] || die "Missing value for --protocol"; REALITY_PROTOCOL="$1" ;;
     --port) shift; [ "$#" -gt 0 ] || die "Missing value for --port"; REALITY_PORT="$1" ;;
+    --hysteria-port) shift; [ "$#" -gt 0 ] || die "Missing value for --hysteria-port"; HYSTERIA_PORT="$1" ;;
     --dest) shift; [ "$#" -gt 0 ] || die "Missing value for --dest"; REALITY_DEST="$1" ;;
     --server-name) shift; [ "$#" -gt 0 ] || die "Missing value for --server-name"; REALITY_SERVER_NAME="$1" ;;
     -h|--help) usage; exit 0 ;;
@@ -103,8 +110,30 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || die "Run as root: sudo bash scripts/install-reality-mosdns.sh"
-[ "$INSTALL_MOSDNS" -eq 1 ] || [ "$INSTALL_REALITY" -eq 1 ] || die "Nothing to install."
 [ -n "$REALITY_PROTOCOL" ] || die "--protocol cannot be empty."
+
+case "$REALITY_PROTOCOL" in
+  reality|reality-vision)
+    INSTALL_REALITY=1
+    INSTALL_HYSTERIA=0
+    ;;
+  hysteria2)
+    INSTALL_REALITY=0
+    INSTALL_HYSTERIA=1
+    ;;
+  reality+hysteria2|reality-vision+hysteria2)
+    INSTALL_REALITY=1
+    INSTALL_HYSTERIA=1
+    ;;
+  *) die "Unsupported protocol: $REALITY_PROTOCOL" ;;
+esac
+
+case "$DEPLOYMENT_MODE" in
+  standalone|3x-ui) ;;
+  *) die "Unsupported deployment mode: $DEPLOYMENT_MODE" ;;
+esac
+
+[ "$INSTALL_MOSDNS" -eq 1 ] || [ "$INSTALL_REALITY" -eq 1 ] || [ "$INSTALL_HYSTERIA" -eq 1 ] || die "Nothing to install."
 
 validate_port() {
   local value="$1"
@@ -116,6 +145,7 @@ validate_port() {
 }
 
 validate_port "$REALITY_PORT"
+validate_port "$HYSTERIA_PORT"
 
 if [ -n "$REALITY_INSTALL_URL" ]; then
   case "$REALITY_INSTALL_URL" in
@@ -159,6 +189,10 @@ if [ "$INSTALL_REALITY" -eq 1 ] && [ -z "$REALITY_SCRIPT_PATH" ] && [ -z "$REALI
   die "Missing local Reality installer: $REPO_DIR/scripts/install-xray-reality.sh"
 fi
 
+if [ "$INSTALL_HYSTERIA" -eq 1 ] && [ ! -f "$REPO_DIR/scripts/install-hysteria2.sh" ]; then
+  die "Missing local Hysteria2 installer: $REPO_DIR/scripts/install-hysteria2.sh"
+fi
+
 free_kb="$(awk '/MemAvailable/ { print $2 }' /proc/meminfo 2>/dev/null || printf '0')"
 if [ "${free_kb:-0}" -gt 0 ] && [ "$free_kb" -lt 131072 ]; then
   die "Available memory is below 128MB; installation is likely to fail."
@@ -190,6 +224,7 @@ for p in \
   /etc/systemd/system/xray.service \
   /lib/systemd/system/xray.service \
   /etc/systemd/system/hysteria2.service \
+  /etc/hysteria \
   /usr/local/bin/hysteria \
   /usr/local/bin/hysteria2
 do
@@ -227,9 +262,11 @@ fi
 if [ "$YES" -ne 1 ]; then
   cat <<EOF
 This will install:
-  mosdns:   $INSTALL_MOSDNS
-  Reality:  $INSTALL_REALITY
-  protocol: $REALITY_PROTOCOL
+  deployment: $DEPLOYMENT_MODE
+  mosdns:     $INSTALL_MOSDNS
+  Reality:    $INSTALL_REALITY
+  Hysteria2:  $INSTALL_HYSTERIA
+  protocol:   $REALITY_PROTOCOL
 
 Safety defaults:
   - mosdns listens on 127.0.0.1:53 only.
@@ -265,11 +302,14 @@ write_manifest() {
     printf 'LOG_FILE=%s\n' "$(quote "$LOG_FILE")"
     printf 'INSTALL_MOSDNS=%s\n' "$(quote "$INSTALL_MOSDNS")"
     printf 'INSTALL_REALITY=%s\n' "$(quote "$INSTALL_REALITY")"
+    printf 'INSTALL_HYSTERIA=%s\n' "$(quote "$INSTALL_HYSTERIA")"
+    printf 'DEPLOYMENT_MODE=%s\n' "$(quote "$DEPLOYMENT_MODE")"
     printf 'MOSDNS_PREEXISTING=%s\n' "$(quote "$has_mosdns_before")"
     printf 'XRAY_PREEXISTING=%s\n' "$(quote "$has_xray_before")"
     printf 'REALITY_INSTALL_URL=%s\n' "$(quote "$REALITY_INSTALL_URL")"
     printf 'REALITY_SCRIPT_SHA256=%s\n' "$(quote "$REALITY_SCRIPT_SHA256")"
     printf 'REALITY_PROTOCOL=%s\n' "$(quote "$REALITY_PROTOCOL")"
+    printf 'HYSTERIA_PORT=%s\n' "$(quote "$HYSTERIA_PORT")"
   } >"$MANIFEST"
   chmod 0644 "$MANIFEST"
 }
@@ -306,7 +346,7 @@ if [ "$INSTALL_MOSDNS" -eq 1 ]; then
 fi
 
 if [ "$INSTALL_REALITY" -eq 1 ]; then
-  args=(--protocol "$REALITY_PROTOCOL")
+  args=(--protocol reality)
   [ -z "$REALITY_PORT" ] || args+=(--port "$REALITY_PORT")
   [ -z "$REALITY_DEST" ] || args+=(--dest "$REALITY_DEST")
   [ -z "$REALITY_SERVER_NAME" ] || args+=(--server-name "$REALITY_SERVER_NAME")
@@ -319,6 +359,13 @@ if [ "$INSTALL_REALITY" -eq 1 ]; then
 
   log "Running Reality installer: $reality_script"
   bash "$reality_script" "${args[@]}"
+fi
+
+if [ "$INSTALL_HYSTERIA" -eq 1 ]; then
+  hargs=()
+  [ -z "$HYSTERIA_PORT" ] || hargs+=(--port "$HYSTERIA_PORT")
+  log "Running Hysteria2 installer."
+  bash "$REPO_DIR/scripts/install-hysteria2.sh" "${hargs[@]}"
 fi
 
 systemctl daemon-reload || true
@@ -334,6 +381,10 @@ if [ "$INSTALL_REALITY" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
   if systemctl list-unit-files xray.service --no-legend 2>/dev/null | awk 'NF { found=1 } END { exit found ? 0 : 1 }'; then
     systemctl is-active --quiet xray || die "xray service exists but is not active after install."
   fi
+fi
+
+if [ "$INSTALL_HYSTERIA" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl is-active --quiet hysteria2 || die "hysteria2 service is not active after install."
 fi
 
 ROLLBACK_ON_FAILURE=0
