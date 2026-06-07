@@ -39,6 +39,8 @@ vless://...
 hy2://...
 ```
 
+Hysteria2 使用 UDP。客户端测速里如果出现 `UDPLatency: Timeout`、`Out: Error`，优先检查服务器防火墙和云厂商安全组是否放行安装输出中的 UDP 端口。
+
 链接也会保存到：
 
 ```text
@@ -101,6 +103,12 @@ sudo ./install.sh \
 sudo ./install.sh \
   --protocol hysteria2 \
   --hysteria-port 29187
+```
+
+Hysteria2 安装后检查 UDP 监听：
+
+```bash
+ss -lunp | grep hysteria
 ```
 
 ## 卸载

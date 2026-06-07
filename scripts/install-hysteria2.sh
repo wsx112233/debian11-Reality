@@ -103,7 +103,7 @@ curl -fsSL --retry 5 --retry-delay 2 --connect-timeout 15 --max-time 180 "$url" 
 install -m 0755 "$tmp_dir/hysteria2" "$HYSTERIA_BIN"
 
 install -d -m 0755 "$HYSTERIA_DIR"
-password="$(openssl rand -base64 24 | tr -d '\n')"
+password="$(openssl rand -hex 24)"
 
 openssl req -x509 -nodes -newkey rsa:2048 \
   -keyout "$HYSTERIA_DIR/server.key" \
@@ -159,6 +159,10 @@ EOF
 systemctl daemon-reload
 systemctl enable --now hysteria2
 systemctl is-active --quiet hysteria2 || die "hysteria2 service failed to start."
+if command -v ss >/dev/null 2>&1; then
+  ss -H -lunp 2>/dev/null | awk -v port=":$PORT" '$5 ~ port "$" { found=1 } END { exit found ? 0 : 1 }' ||
+    die "hysteria2 已启动，但没有检测到 UDP $PORT 监听。"
+fi
 
 server_ip="$(curl -fsS --connect-timeout 5 --max-time 10 https://api6.ipify.org 2>/dev/null || curl -fsS --connect-timeout 5 --max-time 10 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{ print $1 }')"
 server_ip="${server_ip:-YOUR_SERVER_IP}"
@@ -185,6 +189,7 @@ chmod 0600 "$HYSTERIA_DIR/client-link.txt"
 log "Hysteria2 installed."
 log "Client config saved: $HYSTERIA_DIR/client.txt"
 log "Client link saved: $HYSTERIA_DIR/client-link.txt"
+log "请确认服务器防火墙和云厂商安全组已放行 UDP $PORT。"
 echo
 echo "Nekoray hy2://"
 echo "$hy2_link"
