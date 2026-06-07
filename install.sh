@@ -37,11 +37,11 @@ ask_yes_no() {
   esac
 }
 
-echo "Reality + mosdns installer"
+echo "Reality + mosdns 安装器"
 echo
-echo "1) Install"
-echo "2) Uninstall"
-action="$(ask_choice "Choose action" "1")"
+echo "1) 安装"
+echo "2) 卸载"
+action="$(ask_choice "请选择操作，直接回车默认安装" "1")"
 
 case "$action" in
   2)
@@ -50,35 +50,33 @@ case "$action" in
   1)
     ;;
   *)
-    echo "Invalid action: $action" >&2
+    echo "无效操作: $action" >&2
     exit 1
     ;;
 esac
 
 echo
-echo "Deployment mode"
-echo "1) Reality + mosdns without 3x-ui"
-echo "2) Reality + mosdns with 3x-ui"
-mode="$(ask_choice "Choose deployment mode" "1")"
+echo "部署模式"
+echo "1) Reality + mosdns，无 3x-ui"
+mode="$(ask_choice "请选择部署模式" "1")"
 
 case "$mode" in
   1) deployment="standalone" ;;
-  2) deployment="3x-ui" ;;
-  *) echo "Invalid deployment mode: $mode" >&2; exit 1 ;;
+  *) echo "无效部署模式: $mode" >&2; exit 1 ;;
 esac
 
 echo
-echo "Protocol"
+echo "协议"
 echo "1) reality-vision"
 echo "2) hysteria2"
 echo "3) reality-vision + hysteria2"
-protocol_choice="$(ask_choice "Choose protocol" "1")"
+protocol_choice="$(ask_choice "请选择协议" "1")"
 
 case "$protocol_choice" in
   1) protocol="reality-vision" ;;
   2) protocol="hysteria2" ;;
   3) protocol="reality-vision+hysteria2" ;;
-  *) echo "Invalid protocol: $protocol_choice" >&2; exit 1 ;;
+  *) echo "无效协议: $protocol_choice" >&2; exit 1 ;;
 esac
 
 reality_port=""
@@ -88,29 +86,29 @@ server_name="www.microsoft.com"
 
 case "$protocol" in
   reality-vision|reality-vision+hysteria2)
-    reality_port="$(ask_choice "Reality listening port" "443")"
-    dest="$(ask_choice "Reality dest" "$dest")"
+    reality_port="$(ask_choice "Reality 监听端口" "443")"
+    dest="$(ask_choice "Reality 回落目标 dest" "$dest")"
     server_name="$(ask_choice "Reality server-name" "$server_name")"
     ;;
 esac
 
 case "$protocol" in
   hysteria2|reality-vision+hysteria2)
-    hysteria_port="$(ask_choice "Hysteria2 UDP listening port" "8443")"
+    hysteria_port="$(ask_choice "Hysteria2 UDP 监听端口" "8443")"
     ;;
 esac
 
 echo
-echo "Ready to install:"
-echo "  deployment: $deployment"
-echo "  protocol:   $protocol"
-[ -z "$reality_port" ] || echo "  reality:    $reality_port -> $dest / $server_name"
-[ -z "$hysteria_port" ] || echo "  hysteria2:  $hysteria_port/udp"
-printf 'Continue installation? [Y/n]: '
+echo "即将安装:"
+echo "  部署模式: $deployment"
+echo "  协议:     $protocol"
+[ -z "$reality_port" ] || echo "  reality:  $reality_port -> $dest / $server_name"
+[ -z "$hysteria_port" ] || echo "  hysteria2:$hysteria_port/udp"
+printf '确认开始安装？[Y/n]: '
 read -r confirm
 case "${confirm:-Y}" in
   y|Y|yes|YES) ;;
-  *) echo "Cancelled."; exit 0 ;;
+  *) echo "已取消。"; exit 0 ;;
 esac
 
 args=(--deployment "$deployment" --protocol "$protocol")
@@ -118,13 +116,13 @@ args=(--deployment "$deployment" --protocol "$protocol")
 [ -z "$hysteria_port" ] || args+=(--hysteria-port "$hysteria_port")
 
 if [ -e /etc/mosdns ] || [ -e /usr/local/bin/mosdns ]; then
-  if ask_yes_no "Existing mosdns detected. Allow this installer to update/reuse it?" "n"; then
+  if ask_yes_no "检测到已有 mosdns，是否允许本安装器复用或更新它？" "n"; then
     args+=(--allow-existing-mosdns)
   fi
 fi
 
 if [ -e /usr/local/bin/xray ] || [ -e /usr/local/etc/xray ] || [ -e /etc/xray ] || [ -e /usr/local/bin/hysteria2 ] || [ -e /etc/hysteria ]; then
-  if ask_yes_no "Existing Xray/Hysteria detected. Allow this installer to update/reuse it?" "n"; then
+  if ask_yes_no "检测到已有 Xray/Hysteria，是否允许本安装器复用或更新它？" "n"; then
     args+=(--allow-existing-xray)
   fi
 fi

@@ -33,28 +33,28 @@ usage() {
 Usage:
   sudo bash scripts/install-reality-mosdns.sh [options]
 
-Options:
-  --yes                         Run without interactive confirmation.
-  --skip-mosdns                 Do not install mosdns.
-  --skip-reality                Do not install Reality/Xray.
-  --allow-existing-mosdns       Allow installing over an existing /etc/mosdns or mosdns service.
-  --allow-existing-xray         Allow running the Reality installer when Xray/Hysteria files already exist.
-  --reality-script PATH         Use a local debian11-Reality install.sh instead of downloading it.
-  --deployment VALUE            standalone or 3x-ui. Default: standalone.
-  --preflight-only              Run checks only, then exit.
-  --no-rollback                 Do not auto-run uninstall when this wrapper fails after changes begin.
-  --rollback-on-failure         Auto-run uninstall when this wrapper fails after changes begin.
-  --protocol VALUE              reality-vision, hysteria2, or reality-vision+hysteria2.
-  --port PORT                   Port passed to debian11-Reality install.sh.
-  --hysteria-port PORT          Hysteria2 UDP listening port. Default: 8443.
-  --dest HOST:PORT              dest passed to debian11-Reality install.sh.
-  --server-name NAME            server-name passed to debian11-Reality install.sh.
-  -h, --help                    Show this help.
+选项:
+  --yes                         跳过交互确认。
+  --skip-mosdns                 不安装 mosdns。
+  --skip-reality                不安装 Reality/Xray。
+  --allow-existing-mosdns       允许复用或更新已有 mosdns。
+  --allow-existing-xray         允许复用或更新已有 Xray/Hysteria。
+  --reality-script PATH         使用本地 Reality 安装脚本。
+  --deployment VALUE            部署模式，当前项目使用 standalone。
+  --preflight-only              只做环境检查，不安装。
+  --no-rollback                 安装失败后不自动卸载。
+  --rollback-on-failure         安装失败后自动调用卸载脚本。
+  --protocol VALUE              reality-vision、hysteria2 或 reality-vision+hysteria2。
+  --port PORT                   Reality TCP 监听端口。
+  --hysteria-port PORT          Hysteria2 UDP 监听端口，默认 8443。
+  --dest HOST:PORT              Reality 回落目标。
+  --server-name NAME            Reality serverName。
+  -h, --help                    显示帮助。
 
-Environment:
-  REALITY_INSTALL_URL           Optional legacy remote install.sh URL. Empty uses local Xray Reality installer.
-  REALITY_SCRIPT_SHA256         Optional sha256 for the downloaded install.sh.
-  MOSDNS_DOWNLOAD_URL           Optional mosdns release mirror URL.
+环境变量:
+  REALITY_INSTALL_URL           可选的旧版远程 Reality 安装脚本地址。
+  REALITY_SCRIPT_SHA256         可选的远程安装脚本 sha256。
+  MOSDNS_DOWNLOAD_URL           可选的 mosdns 下载镜像地址。
 USAGE
 }
 
@@ -70,13 +70,13 @@ log() {
 print_service_diagnostics() {
   local service="$1"
   echo >&2
-  echo "Diagnostics for $service:" >&2
+  echo "$service 诊断信息:" >&2
   systemctl status "$service" --no-pager -l >&2 || true
   journalctl -u "$service" -n 80 --no-pager >&2 || true
 }
 
 die() {
-  printf '[%s] ERROR: %s\n' "$STACK_NAME" "$*" >&2
+  printf '[%s] 错误: %s\n' "$STACK_NAME" "$*" >&2
   exit 1
 }
 
@@ -89,7 +89,7 @@ on_exit() {
     rmdir "$LOCK_DIR" 2>/dev/null || true
   fi
   if [ "$status" -ne 0 ] && [ "$INSTALL_STARTED" -eq 1 ] && [ "$ROLLBACK_ON_FAILURE" -eq 1 ] && [ -f "$MANIFEST" ]; then
-    log "Install failed; running best-effort rollback."
+    log "安装失败，正在尝试自动回滚。"
     bash "$REPO_DIR/scripts/uninstall-reality-mosdns.sh" --yes >>"$LOG_FILE" 2>&1 || true
   fi
 }
@@ -119,7 +119,7 @@ while [ "$#" -gt 0 ]; do
   shift || true
 done
 
-[ "$(id -u)" -eq 0 ] || die "Run as root: sudo bash scripts/install-reality-mosdns.sh"
+[ "$(id -u)" -eq 0 ] || die "请使用 root 运行：sudo bash scripts/install-reality-mosdns.sh"
 [ -n "$REALITY_PROTOCOL" ] || die "--protocol cannot be empty."
 
 case "$REALITY_PROTOCOL" in
@@ -135,15 +135,16 @@ case "$REALITY_PROTOCOL" in
     INSTALL_REALITY=1
     INSTALL_HYSTERIA=1
     ;;
-  *) die "Unsupported protocol: $REALITY_PROTOCOL" ;;
+  *) die "不支持的协议: $REALITY_PROTOCOL" ;;
 esac
 
 case "$DEPLOYMENT_MODE" in
-  standalone|3x-ui) ;;
-  *) die "Unsupported deployment mode: $DEPLOYMENT_MODE" ;;
+  standalone) ;;
+  3x-ui) die "当前项目定位为无 3x-ui 部署，请使用 --deployment standalone。" ;;
+  *) die "不支持的部署模式: $DEPLOYMENT_MODE" ;;
 esac
 
-[ "$INSTALL_MOSDNS" -eq 1 ] || [ "$INSTALL_REALITY" -eq 1 ] || [ "$INSTALL_HYSTERIA" -eq 1 ] || die "Nothing to install."
+[ "$INSTALL_MOSDNS" -eq 1 ] || [ "$INSTALL_REALITY" -eq 1 ] || [ "$INSTALL_HYSTERIA" -eq 1 ] || die "没有需要安装的组件。"
 
 validate_port() {
   local value="$1"
@@ -184,7 +185,7 @@ command -v install >/dev/null 2>&1 || die "install is required."
 command -v sha256sum >/dev/null 2>&1 || [ -z "$REALITY_SCRIPT_SHA256" ] || die "sha256sum is required when REALITY_SCRIPT_SHA256 is set."
 
 if [ -f "$MANIFEST" ]; then
-  die "Existing install manifest found: $MANIFEST. Run uninstall first, or inspect the previous install state."
+  die "发现已有安装清单: $MANIFEST。请先卸载，或检查上一次安装状态。"
 fi
 
 if [ "$INSTALL_MOSDNS" -eq 1 ] && [ ! -f "$REPO_DIR/scripts/install-debian11.sh" ]; then
@@ -245,11 +246,11 @@ do
 done
 
 if [ "$INSTALL_MOSDNS" -eq 1 ] && [ "$has_mosdns_before" -eq 1 ] && [ "$ALLOW_EXISTING_MOSDNS" -ne 1 ]; then
-  die "Existing mosdns files/service detected. Re-run with --allow-existing-mosdns only if you accept takeover."
+  die "检测到已有 mosdns 文件或服务。确认允许复用或更新时，请加 --allow-existing-mosdns。"
 fi
 
 if [ "$INSTALL_REALITY" -eq 1 ] && [ "$has_xray_before" -eq 1 ] && [ "$ALLOW_EXISTING_XRAY" -ne 1 ]; then
-  die "Existing Xray/Hysteria files/service detected. Re-run with --allow-existing-xray only if you accept takeover."
+  die "检测到已有 Xray/Hysteria 文件或服务。确认允许复用或更新时，请加 --allow-existing-xray。"
 fi
 
 if [ "$INSTALL_MOSDNS" -eq 1 ] && command -v ss >/dev/null 2>&1; then
@@ -260,32 +261,32 @@ if [ "$INSTALL_MOSDNS" -eq 1 ] && command -v ss >/dev/null 2>&1; then
   )"
   if [ -n "$port53_blockers" ]; then
     printf '%s\n' "$port53_blockers" >&2
-    die "Port 53 appears to be occupied. Stop the conflicting local DNS service or install mosdns manually on another listen address."
+    die "53 端口似乎已被占用。请先处理冲突的本地 DNS 服务，或手动修改 mosdns 监听地址。"
   fi
 fi
 
 if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
-  log "Preflight passed. No changes made."
+  log "预检通过，未做任何安装。"
   exit 0
 fi
 
 if [ "$YES" -ne 1 ]; then
   cat <<EOF
-This will install:
-  deployment: $DEPLOYMENT_MODE
-  mosdns:     $INSTALL_MOSDNS
-  Reality:    $INSTALL_REALITY
-  Hysteria2:  $INSTALL_HYSTERIA
-  protocol:   $REALITY_PROTOCOL
+即将安装:
+  部署模式: $DEPLOYMENT_MODE
+  mosdns:   $INSTALL_MOSDNS
+  Reality:  $INSTALL_REALITY
+  Hysteria2:$INSTALL_HYSTERIA
+  协议:     $REALITY_PROTOCOL
 
-Safety defaults:
-  - mosdns listens on 127.0.0.1:53 only.
-  - /etc/resolv.conf is not modified.
-  - Existing mosdns/Xray/Hysteria installs are refused unless explicitly allowed.
-  - Failure after changes begin keeps files in place for diagnosis unless --rollback-on-failure is set.
-  - Installed state is recorded in $MANIFEST for uninstall.
+安全默认值:
+  - mosdns 仅监听 127.0.0.1:53。
+  - 不修改 /etc/resolv.conf。
+  - 检测到已有 mosdns/Xray/Hysteria 时默认拒绝覆盖，除非显式允许。
+  - 安装失败后默认保留文件用于排查；加 --rollback-on-failure 才会自动卸载。
+  - 安装状态记录在 $MANIFEST，用于卸载。
 EOF
-  printf 'Continue? [y/N] '
+  printf '继续安装？[y/N] '
   read -r answer
   case "$answer" in
     y|Y|yes|YES) ;;
@@ -383,7 +384,7 @@ systemctl daemon-reload || true
 if [ "$INSTALL_MOSDNS" -eq 1 ]; then
   if ! systemctl is-active --quiet mosdns; then
     print_service_diagnostics mosdns
-    die "mosdns service is not active after install."
+    die "mosdns 安装后未正常运行。"
   fi
   if command -v dig >/dev/null 2>&1; then
     dig @127.0.0.1 google.com +tries=1 +time=3 +short >/dev/null || die "mosdns did not answer a test query on 127.0.0.1:53."
@@ -397,18 +398,18 @@ if [ "$INSTALL_REALITY" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
 fi
 
 if [ "$INSTALL_HYSTERIA" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
-  systemctl is-active --quiet hysteria2 || die "hysteria2 service is not active after install."
+  systemctl is-active --quiet hysteria2 || die "hysteria2 安装后未正常运行。"
 fi
 
 ROLLBACK_ON_FAILURE=0
 
-log "Install complete."
-log "Validate DNS: dig @127.0.0.1 google.com"
-log "Uninstall: sudo bash $REPO_DIR/scripts/uninstall-reality-mosdns.sh"
+log "安装完成。"
+log "DNS 测试命令: dig @127.0.0.1 google.com"
+log "卸载命令: sudo bash $REPO_DIR/scripts/uninstall-reality-mosdns.sh"
 
 if [ -f /usr/local/etc/xray/client-link.txt ] || [ -f /etc/hysteria/client-link.txt ]; then
   echo
-  echo "Client links:"
+  echo "客户端链接:"
   [ ! -f /usr/local/etc/xray/client-link.txt ] || cat /usr/local/etc/xray/client-link.txt
   [ ! -f /etc/hysteria/client-link.txt ] || cat /etc/hysteria/client-link.txt
 fi

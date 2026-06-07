@@ -33,7 +33,7 @@ log() {
 }
 
 die() {
-  printf '[%s] ERROR: %s\n' "$STACK_NAME" "$*" >&2
+  printf '[%s] 错误: %s\n' "$STACK_NAME" "$*" >&2
   exit 1
 }
 
@@ -49,11 +49,11 @@ while [ "$#" -gt 0 ]; do
   shift || true
 done
 
-[ "$(id -u)" -eq 0 ] || die "Run as root: sudo bash scripts/uninstall-reality-mosdns.sh"
-[ -f "$MANIFEST" ] || die "Manifest not found: $MANIFEST"
+[ "$(id -u)" -eq 0 ] || die "请使用 root 运行：sudo bash scripts/uninstall-reality-mosdns.sh"
+[ -f "$MANIFEST" ] || die "未找到安装清单: $MANIFEST"
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  die "Another $STACK_NAME operation is running, or stale lock exists: $LOCK_DIR"
+  die "另一个 $STACK_NAME 操作正在运行，或锁文件未清理: $LOCK_DIR"
 fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
@@ -61,19 +61,19 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 . "$MANIFEST"
 
 if [ -z "$SELECT_PROTOCOL" ] && [ "$YES" -ne 1 ]; then
-  echo "Protocol uninstall"
-  echo "1) all"
+  echo "选择要卸载的协议"
+  echo "1) 全部"
   echo "2) reality-vision"
   echo "3) hysteria2"
   echo "4) reality-vision + hysteria2"
-  printf 'Choose protocol to uninstall [1]: '
+  printf '请选择要卸载的协议 [1]: '
   read -r protocol_answer
   case "${protocol_answer:-1}" in
     1) SELECT_PROTOCOL="all" ;;
     2) SELECT_PROTOCOL="reality-vision" ;;
     3) SELECT_PROTOCOL="hysteria2" ;;
     4) SELECT_PROTOCOL="reality-vision+hysteria2" ;;
-    *) die "Invalid protocol selection: $protocol_answer" ;;
+    *) die "无效协议选择: $protocol_answer" ;;
   esac
 fi
 
@@ -83,7 +83,7 @@ case "$SELECT_PROTOCOL" in
   reality|reality-vision) PURGE_HYSTERIA=0; PURGE_MOSDNS_CONFIG=0 ;;
   hysteria2) PURGE_REALITY=0; PURGE_MOSDNS_CONFIG=0 ;;
   reality+hysteria2|reality-vision+hysteria2) PURGE_MOSDNS_CONFIG=0 ;;
-  *) die "Unsupported protocol: $SELECT_PROTOCOL" ;;
+  *) die "不支持的协议: $SELECT_PROTOCOL" ;;
 esac
 
 safe_remove() {
@@ -95,32 +95,32 @@ safe_remove() {
       fi
       ;;
     *)
-      die "Refusing to remove unexpected path: $p"
+      die "拒绝删除非预期路径: $p"
       ;;
   esac
 }
 
 if [ "$YES" -ne 1 ]; then
   cat <<EOF
-This will uninstall $STACK_NAME.
+即将卸载 $STACK_NAME。
 
-Recorded install:
-  mosdns installed:  ${INSTALL_MOSDNS:-0}
-  reality installed: ${INSTALL_REALITY:-0}
-  mosdns preexisting: ${MOSDNS_PREEXISTING:-unknown}
-  xray preexisting:   ${XRAY_PREEXISTING:-unknown}
+安装记录:
+  mosdns 已安装:  ${INSTALL_MOSDNS:-0}
+  reality 已安装: ${INSTALL_REALITY:-0}
+  mosdns 原本存在: ${MOSDNS_PREEXISTING:-unknown}
+  xray 原本存在:   ${XRAY_PREEXISTING:-unknown}
 
-Cleanup policy:
-  - Selected protocol: $SELECT_PROTOCOL
-  - Preexisting services are not removed.
-  - apt packages are not removed because they may be shared by production workloads.
-  - firewall/sysctl changes from the upstream Reality script cannot be safely inferred; review them manually if you enabled them there.
+清理策略:
+  - 选择协议: $SELECT_PROTOCOL
+  - 安装前已存在的服务不会被删除。
+  - 不删除 apt 包，因为它们可能被生产环境其他服务共用。
+  - 防火墙和 sysctl 改动无法安全推断，如曾手动调整，请自行复核。
 EOF
-  printf 'Continue? [y/N] '
+  printf '继续卸载？[y/N] '
   read -r answer
   case "$answer" in
     y|Y|yes|YES) ;;
-    *) die "Cancelled." ;;
+    *) die "已取消。" ;;
   esac
 fi
 

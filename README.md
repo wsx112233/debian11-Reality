@@ -1,154 +1,140 @@
-# mosdns DNS architecture for Debian 11 + 3x-ui
+# Debian 11 Reality + mosdns 一键安装
 
-This package builds a local DNS gateway:
+本项目用于在 Debian 11 上部署 `wsx112233/debian11-Reality` 风格的 Reality 代理，并与 mosdns 组合使用。当前定位是：
 
-- Large in-memory cache with lazy cache for near-zero local cache-hit latency.
-- Domestic domains route to AliDNS + DNSPod over DoH/H3 with concurrent racing.
-- Non-domestic domains route to Cloudflare over DoH/H3.
-- DNS-level ad/tracker filtering is enabled before cache/upstream lookup, with built-in common ad rules.
-- Safest default: UDP/TCP port 53 listens on `127.0.0.1` only for same-host 3x-ui/Xray. Open LAN/VPN access only after adding firewall limits.
-
-## Install on Debian 11
-
-For a detailed Chinese deployment guide, see [docs/deployment-zh.md](docs/deployment-zh.md).
-
-Copy this directory to the VPS or Debian host, then run:
-
-```bash
-sudo bash scripts/install-debian11.sh
+```text
+Reality + mosdns，无 3x-ui
 ```
 
-The installer places config in `/etc/mosdns`, installs `/usr/local/bin/mosdns`, creates a systemd service, downloads rules, and starts mosdns.
+默认不会修改 `/etc/resolv.conf`，不会关闭宿主机已有 DNS 服务。mosdns 默认只监听 `127.0.0.1:53`，避免把 VPS 变成公网开放 DNS。
 
-If GitHub download is slow or blocked, provide a mirror URL:
-
-```bash
-sudo MOSDNS_DOWNLOAD_URL="https://your-mirror/mosdns-linux-amd64.zip" bash scripts/install-debian11.sh
-```
-
-## Validate
+## 快速安装
 
 ```bash
-dig @127.0.0.1 baidu.com
-dig @127.0.0.1 google.com
-dig @127.0.0.1 doubleclick.net
-mosdns-benchmark 127.0.0.1 53
-systemctl status mosdns
-journalctl -u mosdns -f
-```
-
-`doubleclick.net` should return `0.0.0.0` or `::` for A/AAAA queries; other query types are blocked with NXDOMAIN.
-
-## Update Rules
-
-```bash
-sudo mosdns-update-rules
-```
-
-Add custom entries without touching generated files:
-
-- `/etc/mosdns/rules/ads.common.txt`
-- `/etc/mosdns/rules/ads.custom.txt`
-- `/etc/mosdns/rules/domestic.custom.txt`
-- `/etc/mosdns/rules/whitelist.txt`
-
-## 3x-ui
-
-Use [docs/3x-ui-xray-routing.md](docs/3x-ui-xray-routing.md) for Xray DNS and routing snippets. The key point is that clients and Xray should use mosdns as their DNS, while Xray routing still decides direct/proxy traffic.
-
-## Reality + mosdns
-
-If you are not using 3x-ui and want to combine `wsx112233/debian11-Reality` with mosdns on Debian 11, use [docs/reality-mosdns-zh.md](docs/reality-mosdns-zh.md).
-
-### One-click Reality + mosdns install
-
-This repository also includes a conservative wrapper that combines this mosdns
-project with `wsx112233/debian11-Reality`:
-
-```bash
-sudo bash scripts/install-reality-mosdns.sh
-```
-
-For compatibility with the old root entrypoint, this also works:
-
-```bash
+cd /opt
+git clone https://github.com/wsx112233/debian11-Reality.git Reality
+cd /opt/Reality
+chmod +x install.sh scripts/*.sh
 sudo ./install.sh
 ```
 
-Running `sudo ./install.sh` without arguments opens an interactive menu:
+直接回车会使用默认选项：
 
 ```text
-1) Install
-2) Uninstall
+安装
+Reality + mosdns，无 3x-ui
+reality-vision
+```
 
-Deployment mode:
-1) Reality + mosdns without 3x-ui
-2) Reality + mosdns with 3x-ui
+安装前会显示确认信息，输入 `y` 才会继续。
 
-Protocol:
+## 可选协议
+
+```text
 1) reality-vision
 2) hysteria2
 3) reality-vision + hysteria2
 ```
 
-Press Enter at each prompt to accept the safest default: install
-`Reality + mosdns without 3x-ui` using `reality-vision`.
+安装成功后会输出 Nekoray 可导入链接：
 
-Non-interactive example:
+```text
+vless://...
+hy2://...
+```
+
+链接也会保存到：
+
+```text
+/usr/local/etc/xray/client-link.txt
+/etc/hysteria/client-link.txt
+```
+
+## 非交互安装
+
+安装 reality-vision：
 
 ```bash
 sudo ./install.sh \
-  --yes \
   --protocol reality-vision \
   --port 443 \
   --dest www.microsoft.com:443 \
   --server-name www.microsoft.com
 ```
 
-Run checks without installing:
+如果已有 mosdns，并确认允许复用或更新：
 
 ```bash
-sudo ./install.sh --preflight-only
+sudo ./install.sh \
+  --protocol reality-vision \
+  --port 443 \
+  --dest www.microsoft.com:443 \
+  --server-name www.microsoft.com \
+  --allow-existing-mosdns
 ```
 
-Production-safety defaults:
-
-- mosdns still listens on `127.0.0.1:53` only.
-- The wrapper does not edit `/etc/resolv.conf` and does not disable existing DNS services.
-- If mosdns, Xray, or Hysteria files already exist, installation stops unless you explicitly pass `--allow-existing-mosdns` or `--allow-existing-xray`.
-- Reality/Xray is installed by the local `scripts/install-xray-reality.sh` script by default.
-- Legacy external Reality installers are still supported with `--reality-script` or `REALITY_INSTALL_URL`, but are not required.
-- Set `XRAY_ZIP_SHA256=<sha256>` if you want to pin the downloaded Xray archive.
-- Install state is recorded in `/var/lib/reality-mosdns-stack/manifest.env` for uninstall.
-- A lock prevents concurrent install/uninstall runs.
-- If the wrapper fails after changes begin, files are kept in place for diagnosis by default; pass `--rollback-on-failure` to auto-run uninstall on failure.
-- Install logs are written to `/var/lib/reality-mosdns-stack/install.log`.
-- The mosdns systemd service uses basic hardening options and installs `/etc/logrotate.d/mosdns`.
-- Generated Nekoray links are printed at the end and saved to `/usr/local/etc/xray/client-link.txt` and `/etc/hysteria/client-link.txt`.
-
-To use a reviewed local copy of another Reality installer instead of the built-in
-local Xray installer:
+安装 hysteria2：
 
 ```bash
-sudo ./install.sh --reality-script ./legacy-install.sh
+sudo ./install.sh \
+  --protocol hysteria2 \
+  --hysteria-port 8443
 ```
 
-Uninstall:
+同时安装：
+
+```bash
+sudo ./install.sh \
+  --protocol reality-vision+hysteria2 \
+  --port 443 \
+  --hysteria-port 8443 \
+  --dest www.microsoft.com:443 \
+  --server-name www.microsoft.com
+```
+
+## 卸载
 
 ```bash
 sudo ./install.sh uninstall
 ```
 
-Uninstall also asks which protocol to remove: all, reality-vision, hysteria2, or
-reality-vision + hysteria2. Removing only one protocol keeps mosdns in place.
+卸载时可以选择：
 
-The uninstall script removes mosdns and common Xray/Hysteria artifacts only when
-the manifest shows they were not present before this wrapper ran. It does not
-remove apt packages because they may be shared by other production workloads.
+```text
+1) 全部
+2) reality-vision
+3) hysteria2
+4) reality-vision + hysteria2
+```
 
-## Notes
+只卸载某个协议时默认保留 mosdns。
 
-- H3/HTTP/3 requires outbound UDP/443 to AliDNS, DNSPod, and Cloudflare.
-- If another service already binds port 53, stop it or change `listen` in `mosdns/config.yaml`.
-- The default `listen` value is `127.0.0.1:53` to avoid creating an open public DNS resolver on a VPS.
-- Cache hits are local memory responses; upstream misses still depend on network latency and provider routing.
+## 预检
+
+```bash
+sudo ./install.sh --preflight-only
+```
+
+## 常用检查
+
+```bash
+systemctl status mosdns
+systemctl status xray
+systemctl status hysteria2
+
+journalctl -u mosdns -n 100 --no-pager
+journalctl -u xray -n 100 --no-pager
+journalctl -u hysteria2 -n 100 --no-pager
+
+dig @127.0.0.1 google.com
+```
+
+## 安全边界
+
+- 不修改 `/etc/resolv.conf`。
+- 不关闭宿主机已有 DNS 服务。
+- mosdns 默认只监听 `127.0.0.1:53`。
+- 检测到已有 mosdns、Xray、Hysteria 时默认拒绝覆盖，除非显式加允许参数。
+- 安装状态记录在 `/var/lib/reality-mosdns-stack/manifest.env`。
+- 安装日志记录在 `/var/lib/reality-mosdns-stack/install.log`。
+- 安装失败默认保留文件，方便排查；需要失败后自动回滚时，加 `--rollback-on-failure`。
