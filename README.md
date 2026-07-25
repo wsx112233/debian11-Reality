@@ -24,7 +24,7 @@
 
 ## 快速开始
 
-**最短一行（推荐）：**
+**安装（推荐）：**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash
