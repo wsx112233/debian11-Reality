@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.6.0"
+readonly SCRIPT_VERSION="1.6.1"
 readonly SANDBOX_ROOT="/etc/vps_proxy_mgr"
 readonly BIN_DIR="/usr/local/bin"
 readonly XRAY_BIN="${BIN_DIR}/vps_xray"
@@ -178,17 +178,20 @@ random_high_port() {
   die "无法找到空闲高位端口"
 }
 
-# 随机 WebSocket 路径（伪装成静态资源）
+# 随机 WebSocket 路径
+# 注意：不要用 /api/ /admin/ /wp- 等，Cloudflare WAF/Bot 易拦截导致 Latency/Speed Error
 random_ws_path() {
-  local a b
-  a=$(openssl rand -hex 4 2>/dev/null || echo "${RANDOM}${RANDOM}")
-  b=$(openssl rand -hex 3 2>/dev/null || echo "${RANDOM}")
-  case $((RANDOM % 5)) in
-    0) echo "/api/v2/${a}" ;;
-    1) echo "/assets/${a}/${b}" ;;
-    2) echo "/static/js/${a}.js" ;;
-    3) echo "/cdn/${a}" ;;
-    *) echo "/${a}${b}" ;;
+  local a b c
+  a=$(openssl rand -hex 6 2>/dev/null || printf '%x' $((RANDOM * RANDOM)))
+  b=$(openssl rand -hex 4 2>/dev/null || printf '%x' $RANDOM)
+  c=$(openssl rand -hex 3 2>/dev/null || printf '%x' $RANDOM)
+  case $((RANDOM % 6)) in
+    0) echo "/ray/${a}" ;;
+    1) echo "/ws/${a}${b}" ;;
+    2) echo "/vless/${a}" ;;
+    3) echo "/download/${a}.dat" ;;
+    4) echo "/img/${a}/${b}.png" ;;
+    *) echo "/${a}/${b}${c}" ;;
   esac
 }
 
