@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.4.1"
+readonly SCRIPT_VERSION="1.4.2"
 readonly SANDBOX_ROOT="/etc/vps_proxy_mgr"
 readonly BIN_DIR="/usr/local/bin"
 readonly XRAY_BIN="${BIN_DIR}/vps_xray"
@@ -1903,63 +1903,69 @@ service_menu() {
 }
 
 #-------------------------------------------------------------------------------
-#  多选解析：支持 "1" / "1 3" / "1,3" / "1, 2 3" / "a" / "all" / "123"
+#  协议安装状态 / 多选解析
 #-------------------------------------------------------------------------------
-# 输出去重后的编号列表（空格分隔），无效输入返回非 0
+# 协议是否已安装（按 state，不依赖“是否在运行”）
+is_reality_installed() { [[ "$(state_get XRAY_INSTALLED)" == "1" ]]; }
+is_ws_installed()      { [[ "$(state_get XRAY_WS_INSTALLED)" == "1" ]]; }
+is_hy2_installed()     { [[ "$(state_get HY2_INSTALLED)" == "1" ]]; }
+
+# 解析多选编号：raw=用户输入 allow=允许的数字串如 "123"
+# 支持: 1 | 1 3 | 1,3 | 13 | a/all（展开 allow 全部）
+# 成功时打印去重后的编号（空格分隔）
 parse_multi_choice() {
-  local raw="$1"
-  local allow="$2"   # 允许的数字字符集合，如 "123"
-  local out=() seen="|" token ch buf=""
-  raw=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[[:space:]]//g')
+  local raw="$1" allow="$2"
+  local out=() seen="|" i d
+  raw=$(echo "${raw:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
   [[ -z "$raw" ]] && return 1
   if [[ "$raw" == "a" || "$raw" == "all" || "$raw" == "*" ]]; then
-    # 展开 allow 中每一位
-    local i
     for (( i=0; i<${#allow}; i++ )); do
       out+=("${allow:i:1}")
     done
     printf '%s\n' "${out[*]}"
     return 0
   fi
-  # 去掉逗号，剩余应为数字
   raw="${raw//,/}"
-  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
-    return 1
-  fi
-  local i d
+  [[ "$raw" =~ ^[0-9]+$ ]] || return 1
   for (( i=0; i<${#raw}; i++ )); do
     d="${raw:i:1}"
-    if [[ "$allow" != *"$d"* ]]; then
-      return 1
-    fi
+    [[ "$allow" == *"$d"* ]] || return 1
     if [[ "$seen" != *"|${d}|"* ]]; then
       out+=("$d")
       seen+="${d}|"
     fi
   done
-  [[ ${#out[@]} -eq 0 ]] && return 1
+  [[ ${#out[@]} -gt 0 ]] || return 1
   printf '%s\n' "${out[*]}"
 }
 
-# 安装子菜单：单选或多选协议
+#---------- 安装：列出全部协议，多选要装哪些 ----------
 menu_install() {
   echo
-  echo -e "${C_BOLD}--- 安装（单选 / 多选）---${C_RESET}"
-  echo "  [1] REALITY-Vision"
-  echo "  [2] Hysteria 2"
-  echo "  [3] VLESS+WS（CF 优选 IP）"
+  echo -e "${C_BOLD}--- 安装协议（可多选）---${C_RESET}"
+  echo -e "  [1] REALITY-Vision          当前: $(status_label xray)"
+  echo -e "  [2] Hysteria 2              当前: $(status_label hy2)"
+  echo -e "  [3] VLESS+WS（CF 优选 IP）  当前: $(status_label ws)"
   echo
-  echo -e "  ${C_DIM}单选示例: 1    多选示例: 1 3  或  1,3  或  13${C_RESET}"
-  echo -e "  ${C_DIM}全部安装: a  或  all    返回: 0${C_RESET}"
-  local raw picks p t0
-  raw=$(ask "请选择要安装的协议" "")
+  echo -e "  ${C_DIM}单选: 1     多选: 1 3  或  1,3  或  13${C_RESET}"
+  echo -e "  ${C_DIM}全选: a     返回: 0${C_RESET}"
+  echo
+  local raw picks p t0 names=""
+  raw=$(ask "选择要【安装】的协议编号" "")
   [[ -z "$raw" || "$raw" == "0" ]] && { log_info "已取消"; return 0; }
   if ! picks=$(parse_multi_choice "$raw" "123"); then
-    log_warn "无效选择: ${raw}（仅 1/2/3，可多选）"
+    log_warn "无效输入「${raw}」。请输入 1/2/3，多选用空格或逗号，例如: 1 3"
     return 0
   fi
+  for p in $picks; do
+    case "$p" in
+      1) names+="REALITY " ;;
+      2) names+="Hy2 " ;;
+      3) names+="VLESS-WS " ;;
+    esac
+  done
+  log_step "将安装: ${names}"
   t0=$(date +%s)
-  log_step "开始安装: ${picks}"
   for p in $picks; do
     echo
     case "$p" in
@@ -1969,48 +1975,91 @@ menu_install() {
     esac
   done
   echo
-  log_ok "所选协议处理完成（耗时 $(( $(date +%s) - t0 ))s）"
+  log_ok "安装流程结束（耗时 $(( $(date +%s) - t0 ))s）"
   show_all_links
 }
 
-# 卸载子菜单：单选或多选协议；a=全部清理
+#---------- 卸载：只列出【已安装】的协议，再多选 ----------
+# 动态编号 → 协议 id 映射写入临时关联（用平行数组）
 menu_uninstall() {
+  local ids=() labels=() allow="" i=0 n names="" raw picks p idx
   echo
-  echo -e "${C_BOLD}--- 卸载（单选 / 多选）---${C_RESET}"
-  echo "  [1] REALITY-Vision     状态: $(status_label xray)"
-  echo "  [2] Hysteria 2         状态: $(status_label hy2)"
-  echo "  [3] VLESS+WS           状态: $(status_label ws)"
+  echo -e "${C_BOLD}--- 卸载协议（仅显示已安装，可多选）---${C_RESET}"
+
+  if is_reality_installed; then
+    i=$((i + 1))
+    ids+=("reality")
+    labels+=("REALITY-Vision")
+    allow+="$i"
+    echo -e "  [${i}] REALITY-Vision     当前: $(status_label xray)"
+  fi
+  if is_hy2_installed; then
+    i=$((i + 1))
+    ids+=("hy2")
+    labels+=("Hysteria 2")
+    allow+="$i"
+    echo -e "  [${i}] Hysteria 2         当前: $(status_label hy2)"
+  fi
+  if is_ws_installed; then
+    i=$((i + 1))
+    ids+=("ws")
+    labels+=("VLESS+WS")
+    allow+="$i"
+    echo -e "  [${i}] VLESS+WS           当前: $(status_label ws)"
+  fi
+
+  if [[ $i -eq 0 ]]; then
+    echo
+    log_warn "当前没有任何已安装协议，无需卸载。"
+    log_info "请先通过主菜单 [1] 安装协议。"
+    return 0
+  fi
+
   echo
-  echo -e "  ${C_DIM}单选示例: 2    多选示例: 1 3  或  1,2${C_RESET}"
-  echo -e "  ${C_DIM}全部卸载(含 TG 加速残留): a  或  all    返回: 0${C_RESET}"
-  local raw picks p
-  raw=$(ask "请选择要卸载的协议" "")
+  if [[ $i -eq 1 ]]; then
+    echo -e "  ${C_DIM}输入 ${allow} 卸载该项；a=卸载全部；0=返回${C_RESET}"
+  else
+    echo -e "  ${C_DIM}单选: ${allow:0:1}   多选: 如 $(echo "$allow" | sed 's/./& /g' | sed 's/ $//') 或连写 ${allow}${C_RESET}"
+    echo -e "  ${C_DIM}全选卸载: a    返回: 0${C_RESET}"
+  fi
+  echo
+
+  raw=$(ask "选择要【卸载】的编号" "")
   [[ -z "$raw" || "$raw" == "0" ]] && { log_info "已取消"; return 0; }
-  # all → 走彻底全清（含 TG）
-  local raw_l
-  raw_l=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[[:space:]]//g')
-  if [[ "$raw_l" == "a" || "$raw_l" == "all" || "$raw_l" == "*" ]]; then
-    uninstall_all
+
+  if ! picks=$(parse_multi_choice "$raw" "$allow"); then
+    log_warn "无效输入「${raw}」。只能选上面列出的已安装项编号。"
     return 0
   fi
-  if ! picks=$(parse_multi_choice "$raw" "123"); then
-    log_warn "无效选择: ${raw}（仅 1/2/3，可多选）"
-    return 0
-  fi
-  if ! confirm "确认卸载所选: ${picks} ？"; then
+
+  names=""
+  for p in $picks; do
+    idx=$((p - 1))
+    names+="${labels[idx]} "
+  done
+  if ! confirm "确认卸载: ${names}？"; then
     log_info "已取消"
     return 0
   fi
-  log_step "开始卸载: ${picks}"
+
+  log_step "开始卸载: ${names}"
   for p in $picks; do
+    idx=$((p - 1))
     echo
-    case "$p" in
-      1) uninstall_reality || true ;;
-      2) uninstall_hysteria2 || true ;;
-      3) uninstall_vless_ws || true ;;
+    case "${ids[idx]}" in
+      reality) uninstall_reality || true ;;
+      hy2)     uninstall_hysteria2 || true ;;
+      ws)      uninstall_vless_ws || true ;;
     esac
   done
-  log_ok "所选协议卸载完成"
+
+  # 若已全部卸完，再兜底清 TG（各卸载函数内也会 cleanup_tg_if_idle）
+  if ! any_protocol_installed; then
+    uninstall_tg_accel || true
+    log_ok "全部协议已卸完，TG 加速残留已清理"
+  else
+    log_ok "所选协议卸载完成"
+  fi
 }
 
 #-------------------------------------------------------------------------------
@@ -2028,18 +2077,16 @@ BANNER
   echo -e "${C_RESET}"
   echo -e "  版本 ${SCRIPT_VERSION}  ·  沙盒 ${SANDBOX_ROOT}"
   echo
-  echo -e "  状态  REALITY  : $(status_label xray)"
-  echo -e "  状态  VLESS+WS : $(status_label ws)"
-  echo -e "  状态  Hy2      : $(status_label hy2)"
+  echo -e "  REALITY  : $(status_label xray)"
+  echo -e "  VLESS+WS : $(status_label ws)"
+  echo -e "  Hy2      : $(status_label hy2)"
   echo
-  echo -e "${C_BOLD}功能${C_RESET}"
-  echo "  [1] 安装协议   （支持单选 / 多选）"
-  echo "  [2] 卸载协议   （支持单选 / 多选 / 全清）"
-  echo "  [3] 查看节点参数 / 导入链接 / 二维码"
-  echo "  [4] 重启 / 停止 / 查看服务状态"
+  echo -e "${C_BOLD}菜单${C_RESET}"
+  echo "  [1] 安装   — 选择要安装的协议（可多选）"
+  echo "  [2] 卸载   — 仅列出已安装协议（可多选）"
+  echo "  [3] 节点参数 / 导入链接 / 二维码"
+  echo "  [4] 服务重启 / 停止 / 状态"
   echo "  [0] 退出"
-  echo
-  echo -e "  ${C_DIM}安装多选示例: 进入[1]后输入 1 3 或 13${C_RESET}"
   echo
 }
 
@@ -2059,7 +2106,7 @@ main_loop() {
         exit 0
         ;;
       *)
-        log_warn "无效选项: ${choice}"
+        log_warn "无效选项: ${choice}（请输入 0-4）"
         ;;
     esac
     echo
