@@ -1,0 +1,13 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local secrets / runtime (should never be committed)
+state.env
+*.key
+*.crt
+/etc/
