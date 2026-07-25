@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.6.4"
+readonly SCRIPT_VERSION="1.6.5"
 # Cloudflare 橙云「默认支持」的回源端口（任意高位如 44303 橙云不转发）
 # 文档: https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # HTTP 回源（SSL 模式 Flexible：源站无 TLS）
@@ -2099,11 +2099,21 @@ install_hysteria2() {
     fi
   fi
 
-  if confirm "启用 Salamander 混淆 obfs？（抗 DPI，客户端需填相同密码）"; then
-    obfs_on="1"
-    obfs_pass=$(rand_password 16)
-    obfs_pass=$(ask "obfs 密码（回车用随机）" "$obfs_pass")
-    state_set "HY2_OBFS" "$obfs_pass"
+  # 留空=不启用；直接输入密码=启用（避免把密码误填进 y/N）
+  obfs_pass=$(ask "Salamander 混淆密码（回车跳过不启用）" "")
+  if [[ -n "$obfs_pass" ]]; then
+    # 用户若习惯输入 y，再给一次随机密码
+    if [[ "${obfs_pass,,}" == "y" || "${obfs_pass,,}" == "yes" ]]; then
+      obfs_pass=$(rand_password 16)
+      obfs_pass=$(ask "obfs 密码（回车用随机）" "$obfs_pass")
+    fi
+    if [[ -n "$obfs_pass" && "${obfs_pass,,}" != "n" && "${obfs_pass,,}" != "no" ]]; then
+      obfs_on="1"
+      state_set "HY2_OBFS" "$obfs_pass"
+      log_ok "已启用 obfs，密码: ${obfs_pass}"
+    else
+      state_set "HY2_OBFS" ""
+    fi
   else
     state_set "HY2_OBFS" ""
   fi
@@ -2286,7 +2296,7 @@ build_vless_link() {
 
 # 按指定地址构建 Hy2 链接（$1 可选，默认优先 IPv6）
 build_hy2_link() {
-  local ip host port pass name tag qs obfs hop_s hop_e mport
+  local ip host port pass name tag qs obfs hop_s hop_e
   ip="${1:-}"
   [[ -z "$ip" ]] && ip=$(get_public_ip)
   host=$(format_host_for_uri "$ip")
@@ -2300,18 +2310,22 @@ build_hy2_link() {
   else
     tag="Hy2-IPv4"
   fi
-  # 端口跳跃：URI 使用 hop 段，客户端在区间内跳端口
-  mport="$port"
+  # 标准 URI：主机后必须是单一端口；端口跳跃用查询参数 mport=start-end
+  # 错误示例（多数客户端解析失败、导入 0 条）:
+  #   hysteria2://pass@ip:38324-40323?...
+  # 正确:
+  #   hysteria2://pass@ip:30585?mport=38324-40323&...
+  qs="insecure=1&sni=www.apple.com"
   if [[ "$(state_get HY2_HOP)" == "1" && -n "$hop_s" && -n "$hop_e" ]]; then
-    mport="${hop_s}-${hop_e}"
+    qs+="&mport=${hop_s}-${hop_e}"
     tag="${tag}-hop"
   fi
-  name=$(urlencode "$tag")
-  qs="insecure=1&sni=www.apple.com"
   if [[ -n "$obfs" ]]; then
     qs+="&obfs=salamander&obfs-password=$(urlencode "$obfs")"
   fi
-  echo "hysteria2://${pass}@${host}:${mport}?${qs}#${name}"
+  name=$(urlencode "$tag")
+  # 密码中的特殊字符需编码（但当前生成的是字母数字）
+  echo "hysteria2://${pass}@${host}:${port}?${qs}#${name}"
 }
 
 # VLESS+WS 链接：地址可用 CF 优选 IP；Host/SNI 用域名
@@ -2399,7 +2413,8 @@ show_hy2_link() {
   print_address_summary
   echo -e "  主端口   ${C_GREEN}$(state_get HY2_PORT)/UDP${C_RESET}"
   if [[ "$(state_get HY2_HOP)" == "1" ]]; then
-    echo -e "  端口跳跃 ${C_GREEN}$(state_get HY2_HOP_START)-$(state_get HY2_HOP_END)${C_RESET} → 主端口（抗 QoS）"
+    echo -e "  端口跳跃 ${C_GREEN}$(state_get HY2_HOP_START)-$(state_get HY2_HOP_END)${C_RESET} → 主端口 $(state_get HY2_PORT)（抗 QoS）"
+    echo -e "  ${C_DIM}链接格式: 主机端口=主端口，mport=跳跃段（勿写成 ip:start-end）${C_RESET}"
   else
     echo -e "  端口跳跃 ${C_DIM}未启用${C_RESET}"
   fi
@@ -2414,10 +2429,14 @@ show_hy2_link() {
   _tier=$(state_get "HY2_TIER"); _bw=$(state_get "HY2_BW")
   [[ -n "$_tier" ]] && echo -e "  档位     ${_tier} · ${_bw:-auto}"
   hr
-  echo -e "  ${C_CYAN}导入链接${C_RESET}"
+  echo -e "  ${C_CYAN}导入链接（可直接粘贴）${C_RESET}"
   echo "  $link_primary"
   echo
-  print_qr "$link_primary" "Hy2"
+  # 再给一行无 # 备注的纯链接，部分客户端对 fragment 敏感
+  echo -e "  ${C_DIM}无备注版:${C_RESET}"
+  echo "  ${link_primary%%#*}"
+  echo
+  print_qr "${link_primary%%#*}" "Hy2"
   if is_ipv6 "$ip6" && is_ipv4 "$ip4"; then
     link_v4=$(build_hy2_link "$ip4")
     echo -e "  ${C_DIM}IPv4 备用:${C_RESET}"
