@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.4.2"
+readonly SCRIPT_VERSION="1.5.0"
 readonly SANDBOX_ROOT="/etc/vps_proxy_mgr"
 readonly BIN_DIR="/usr/local/bin"
 readonly XRAY_BIN="${BIN_DIR}/vps_xray"
@@ -65,28 +65,61 @@ readonly TG_CIDRS=(
   "2001:b28:f23f::/48"
 )
 
-# 颜色
+# 颜色 / 样式
 readonly C_RESET='\033[0m'
 readonly C_RED='\033[0;31m'
 readonly C_GREEN='\033[0;32m'
 readonly C_YELLOW='\033[0;33m'
 readonly C_BLUE='\033[0;34m'
+readonly C_MAGENTA='\033[0;35m'
 readonly C_CYAN='\033[0;36m'
+readonly C_WHITE='\033[1;37m'
 readonly C_BOLD='\033[1m'
 readonly C_DIM='\033[2m'
+readonly C_BG='\033[48;5;236m'
+
+# 高位端口范围（避开常见系统服务）
+readonly PORT_HIGH_MIN=20000
+readonly PORT_HIGH_MAX=60000
 
 #-------------------------------------------------------------------------------
-#  日志与工具函数
+#  日志与 UI
 #-------------------------------------------------------------------------------
-log_info()  { echo -e "${C_CYAN}[INFO]${C_RESET}  $*"; }
-log_ok()    { echo -e "${C_GREEN}[ OK ]${C_RESET}  $*"; }
-log_warn()  { echo -e "${C_YELLOW}[WARN]${C_RESET}  $*"; }
-log_err()   { echo -e "${C_RED}[ERR ]${C_RESET}  $*" >&2; }
-log_step()  { echo -e "${C_BLUE}${C_BOLD}==>${C_RESET} ${C_BOLD}$*${C_RESET}"; }
+log_info()  { echo -e "  ${C_CYAN}●${C_RESET} $*"; }
+log_ok()    { echo -e "  ${C_GREEN}✔${C_RESET} $*"; }
+log_warn()  { echo -e "  ${C_YELLOW}!${C_RESET} $*"; }
+log_err()   { echo -e "  ${C_RED}✘${C_RESET} $*" >&2; }
+log_step()  { echo -e "\n  ${C_MAGENTA}▸${C_RESET} ${C_BOLD}$*${C_RESET}"; }
 
 die() {
   log_err "$*"
   exit 1
+}
+
+hr() {
+  echo -e "  ${C_DIM}────────────────────────────────────────────${C_RESET}"
+}
+
+ui_box_top() {
+  echo -e "${C_CYAN}  ╭──────────────────────────────────────────────╮${C_RESET}"
+}
+ui_box_mid() {
+  # $1 = 内容（已含颜色亦可）
+  printf "${C_CYAN}  │${C_RESET} %-44s ${C_CYAN}│${C_RESET}\n" "$1"
+}
+ui_box_bot() {
+  echo -e "${C_CYAN}  ╰──────────────────────────────────────────────╯${C_RESET}"
+}
+
+ui_section() {
+  echo
+  echo -e "  ${C_WHITE}${C_BOLD}$1${C_RESET}"
+  hr
+}
+
+pause_return() {
+  echo
+  _tty_read "$(echo -e "  ${C_DIM}按 Enter 返回…${C_RESET}")" >/dev/null || true
 }
 
 # 从终端读入（兼容 curl|bash / bash <(curl) 管道场景）
@@ -106,10 +139,10 @@ ask() {
   local default="${2:-}"
   local reply
   if [[ -n "$default" ]]; then
-    reply=$(_tty_read "$(echo -e "${C_YELLOW}${prompt}${C_RESET} [${default}]: ")")
+    reply=$(_tty_read "$(echo -e "  ${C_YELLOW}?${C_RESET} ${prompt} ${C_DIM}[${default}]${C_RESET}: ")")
     echo "${reply:-$default}"
   else
-    reply=$(_tty_read "$(echo -e "${C_YELLOW}${prompt}${C_RESET}: ")")
+    reply=$(_tty_read "$(echo -e "  ${C_YELLOW}?${C_RESET} ${prompt}: ")")
     echo "${reply:-}"
   fi
 }
@@ -117,8 +150,84 @@ ask() {
 confirm() {
   local prompt="$1"
   local reply
-  reply=$(_tty_read "$(echo -e "${C_YELLOW}${prompt} [y/N]${C_RESET}: ")")
+  reply=$(_tty_read "$(echo -e "  ${C_YELLOW}?${C_RESET} ${prompt} ${C_DIM}[y/N]${C_RESET}: ")")
   [[ "${reply,,}" == "y" || "${reply,,}" == "yes" ]]
+}
+
+# 随机高位端口（20000–60000，排除占用）
+random_high_port() {
+  local proto="${1:-tcp}" tries=0 port span r
+  span=$((PORT_HIGH_MAX - PORT_HIGH_MIN + 1))
+  while (( tries < 80 )); do
+    r=$RANDOM
+    # 两次 RANDOM 扩大范围，避免 15bit 偏差
+    r=$(( (r << 15) ^ RANDOM ))
+    port=$(( PORT_HIGH_MIN + (r % span + span) % span ))
+    if ! port_in_use "$port" "$proto"; then
+      echo "$port"
+      return 0
+    fi
+    tries=$((tries + 1))
+  done
+  for port in $(seq "$PORT_HIGH_MIN" 97 "$PORT_HIGH_MAX"); do
+    if ! port_in_use "$port" "$proto"; then
+      echo "$port"
+      return 0
+    fi
+  done
+  die "无法找到空闲高位端口"
+}
+
+# 随机 WebSocket 路径（伪装成静态资源）
+random_ws_path() {
+  local a b
+  a=$(openssl rand -hex 4 2>/dev/null || echo "${RANDOM}${RANDOM}")
+  b=$(openssl rand -hex 3 2>/dev/null || echo "${RANDOM}")
+  case $((RANDOM % 5)) in
+    0) echo "/api/v2/${a}" ;;
+    1) echo "/assets/${a}/${b}" ;;
+    2) echo "/static/js/${a}.js" ;;
+    3) echo "/cdn/${a}" ;;
+    *) echo "/${a}${b}" ;;
+  esac
+}
+
+# 选端口：默认随机高位，回车采用；可输入自定义
+# 提示打到 stderr，stdout 仅输出端口数字
+pick_port() {
+  local proto="$1" label="${2:-端口}"
+  local suggested port
+  suggested=$(random_high_port "$proto")
+  echo -e "  ${C_DIM}${label} · ${proto^^} · 随机高位 ${suggested}${C_RESET}" >&2
+  while true; do
+    port=$(ask "端口（回车采用 ${suggested}）" "$suggested")
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+      log_warn "请输入 1–65535" >&2
+      continue
+    fi
+    if port_in_use "$port" "$proto"; then
+      log_warn "端口 ${port}/${proto} 已被占用" >&2
+      port_who "$port" "$proto" | sed 's/^/    /' >&2 || true
+      if ! confirm "仍要使用？"; then
+        suggested=$(random_high_port "$proto")
+        echo -e "  ${C_DIM}重新生成: ${suggested}${C_RESET}" >&2
+        continue
+      fi
+    fi
+    printf '%s\n' "$port"
+    return 0
+  done
+}
+
+# 选 WS path：默认随机，可改（stdout 仅路径）
+pick_ws_path() {
+  local suggested path
+  suggested=$(random_ws_path)
+  echo -e "  ${C_DIM}WebSocket 路径 · 随机 ${suggested}${C_RESET}" >&2
+  path=$(ask "路径（回车采用随机）" "$suggested")
+  [[ "$path" == /* ]] || path="/${path}"
+  path=$(echo "$path" | tr -d '[:space:]')
+  printf '%s\n' "$path"
 }
 
 # 生成随机字符串
@@ -550,28 +659,10 @@ port_who() {
   fi
 }
 
+# 兼容旧名
 prompt_port() {
-  local proto="$1" default="$2" label="${3:-端口}"
-  local port
-  while true; do
-    port=$(ask "请输入 ${label} (${proto^^})" "$default")
-    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
-      log_warn "端口无效，请输入 1-65535"
-      continue
-    fi
-    if port_in_use "$port" "$proto"; then
-      log_warn "端口 ${port}/${proto} 已被占用："
-      port_who "$port" "$proto" | sed 's/^/    /' || true
-      log_warn "常见占用进程：nginx / caddy / apache2 / 其他代理"
-      if confirm "仍要使用该端口（可能冲突）？"; then
-        echo "$port"
-        return 0
-      fi
-      continue
-    fi
-    echo "$port"
-    return 0
-  done
+  local proto="$1" _default="$2" label="${3:-端口}"
+  pick_port "$proto" "$label"
 }
 
 #-------------------------------------------------------------------------------
@@ -1185,23 +1276,24 @@ uninstall_tg_accel() {
 install_reality() {
   local t0 port sni
   t0=$(date +%s)
-  log_step "安装 Xray REALITY-Vision (VLESS + TCP + REALITY + Vision)"
+  ui_section "安装 REALITY-Vision"
+  log_info "协议: VLESS + TCP + REALITY + Vision · 随机高位端口"
   ensure_sandbox
   install_deps
 
   if [[ "$(state_get XRAY_INSTALLED)" == "1" ]]; then
-    log_warn "检测到已安装 REALITY"
-    if ! confirm "是否覆盖重装？"; then
+    log_warn "已安装 REALITY"
+    if ! confirm "覆盖重装？"; then
       return 0
     fi
-    # 仅卸 REALITY 入站，保留 WS
     local oldp
     oldp=$(state_get "XRAY_PORT")
     [[ -n "$oldp" ]] && fw_remove "$oldp" "tcp" "vps_proxy_mgr_xray" || true
     state_set "XRAY_INSTALLED" "0"
   fi
 
-  port=$(prompt_port "tcp" "443" "REALITY TCP 端口")
+  port=$(pick_port "tcp" "REALITY")
+  log_info "探测可用伪装 SNI…"
   sni=$(pick_sni)
 
   if [[ ! -x "$XRAY_BIN" ]]; then
@@ -1216,7 +1308,8 @@ install_reality() {
   ensure_tg_accel
   write_xray_systemd
 
-  log_ok "REALITY-Vision 安装完成（耗时 $(( $(date +%s) - t0 ))s）"
+  echo
+  log_ok "REALITY 完成 · 端口 ${C_GREEN}${port}${C_RESET} · SNI ${sni} · ${C_DIM}$(( $(date +%s) - t0 ))s${C_RESET}"
   show_xray_link
 }
 
@@ -1251,15 +1344,16 @@ uninstall_reality() {
 }
 
 install_vless_ws() {
-  local t0 port path host uuid
+  local t0 port path host uuid def_host
   t0=$(date +%s)
-  log_step "安装 VLESS + WebSocket（可走 Cloudflare 优选 IP）"
+  ui_section "安装 VLESS + WebSocket（CF 优选 IP）"
+  log_info "源站随机高位端口 + 随机 path · 客户端连 CF:443"
   ensure_sandbox
   install_deps
 
   if [[ "$(state_get XRAY_WS_INSTALLED)" == "1" ]]; then
-    log_warn "检测到已安装 VLESS+WS"
-    if ! confirm "是否覆盖重装？"; then
+    log_warn "已安装 VLESS+WS"
+    if ! confirm "覆盖重装？"; then
       return 0
     fi
     local oldp
@@ -1268,10 +1362,10 @@ install_vless_ws() {
     state_set "XRAY_WS_INSTALLED" "0"
   fi
 
-  port=$(prompt_port "tcp" "8080" "VLESS+WS 源站端口（CF 回源常用 80/8080）")
-  path=$(ask "WebSocket path（以 / 开头）" "/$(rand_hex 8)")
-  [[ "$path" == /* ]] || path="/${path}"
-  host=$(ask "Host / 域名（CF 解析到本机的域名，可先填 IP）" "$(get_public_ipv4 2>/dev/null || get_public_ip)")
+  port=$(pick_port "tcp" "VLESS+WS 源站")
+  path=$(pick_ws_path)
+  def_host=$(get_public_ipv4 2>/dev/null || get_public_ip)
+  host=$(ask "域名 Host（CF 解析到本机；可先填 IP）" "$def_host")
 
   if [[ ! -x "$XRAY_BIN" ]]; then
     install_xray_binary
@@ -1286,8 +1380,9 @@ install_vless_ws() {
   ensure_tg_accel
   write_xray_systemd
 
-  log_ok "VLESS+WS 安装完成（耗时 $(( $(date +%s) - t0 ))s）"
-  log_info "CF 面板：DNS 橙云代理 → 源站 ${host}:${port}，SSL 建议 Full；客户端地址填 CF 优选 IP，Host/SNI 填域名"
+  echo
+  log_ok "VLESS+WS 完成 · 源站 ${port}${path} · Host ${host}"
+  log_info "CF：橙云 → 回源 ${port}；客户端地址=优选 IP，端口 443，TLS 开"
   show_ws_link
 }
 
@@ -1500,27 +1595,22 @@ EOF
 }
 
 install_hysteria2() {
-  local t0
+  local t0 port
   t0=$(date +%s)
-  log_step "安装 Hysteria 2 (QUIC 抗丢包)"
+  ui_section "安装 Hysteria 2"
+  log_info "QUIC / UDP · 随机高位端口"
   ensure_sandbox
   install_deps
 
   if [[ "$(state_get HY2_INSTALLED)" == "1" ]] || svc_exists "$HY2_SVC"; then
-    log_warn "检测到已安装 Hysteria2"
-    if ! confirm "是否覆盖重装？"; then
+    log_warn "已安装 Hysteria2"
+    if ! confirm "覆盖重装？"; then
       return 0
     fi
     uninstall_hysteria2 || true
   fi
 
-  local default_port="8443"
-  # 若 443/UDP 空闲可优先（可与 REALITY 的 443/TCP 同端口协同）
-  if ! port_in_use 443 "udp"; then
-    default_port="443"
-  fi
-  local port
-  port=$(prompt_port "udp" "$default_port" "Hysteria2 UDP 端口")
+  port=$(pick_port "udp" "Hysteria2")
 
   install_hy2_binary
   gen_hy2_cert
@@ -1530,7 +1620,8 @@ install_hysteria2() {
   write_hy2_systemd
 
   state_set "HY2_INSTALLED" "1"
-  log_ok "Hysteria2 安装完成（耗时 $(( $(date +%s) - t0 ))s）"
+  echo
+  log_ok "Hysteria2 完成 · UDP ${C_GREEN}${port}${C_RESET} · ${C_DIM}$(( $(date +%s) - t0 ))s${C_RESET}"
   show_hy2_link
 }
 
@@ -1734,54 +1825,38 @@ print_qr() {
 }
 
 show_xray_link() {
-  if [[ "$(state_get XRAY_INSTALLED)" != "1" ]] && [[ ! -f "${XRAY_DIR}/config.json" ]]; then
-    log_warn "REALITY 未安装"
+  if [[ "$(state_get XRAY_INSTALLED)" != "1" ]]; then
     return 0
   fi
   local ip6 ip4 link_primary link_v4
   ip6=$(get_public_ipv6 2>/dev/null || true)
   ip4=$(get_public_ipv4 2>/dev/null || true)
-  # 有 IPv6 则主链接用 IPv6
   if is_ipv6 "$ip6"; then
     link_primary=$(build_vless_link "$ip6")
   else
     link_primary=$(build_vless_link "${ip4:-$(get_public_ip)}")
   fi
-  echo
-  echo -e "${C_BOLD}${C_GREEN}======== Xray REALITY-Vision 节点参数 ========${C_RESET}"
+  ui_section "REALITY-Vision"
   print_address_summary
-  echo -e "  端口       : $(state_get XRAY_PORT)"
-  echo -e "  监听       : :: (双栈，IPv4+IPv6)"
-  echo -e "  UUID       : $(state_get XRAY_UUID)"
-  echo -e "  流控 flow  : xtls-rprx-vision"
-  echo -e "  传输       : tcp"
-  echo -e "  安全       : reality"
-  echo -e "  SNI        : $(state_get XRAY_SNI)"
-  echo -e "  PublicKey  : $(state_get XRAY_PUBKEY)"
-  echo -e "  ShortId    : $(state_get XRAY_SHORTID)"
-  echo -e "  Fingerprint: chrome"
+  echo -e "  端口     ${C_GREEN}$(state_get XRAY_PORT)${C_RESET}  ·  flow=xtls-rprx-vision"
+  echo -e "  UUID     $(state_get XRAY_UUID)"
+  echo -e "  SNI      $(state_get XRAY_SNI)"
+  echo -e "  PBK      $(state_get XRAY_PUBKEY)"
+  echo -e "  SID      $(state_get XRAY_SHORTID)  ·  fp=chrome"
+  hr
+  echo -e "  ${C_CYAN}导入链接${C_RESET}"
+  echo "  $link_primary"
   echo
-  if is_ipv6 "$ip6"; then
-    echo -e "${C_CYAN}导入链接 (IPv6 优先):${C_RESET}"
-  else
-    echo -e "${C_CYAN}导入链接 (IPv4):${C_RESET}"
-  fi
-  echo "$link_primary"
-  echo
-  print_qr "$link_primary" "VLESS 优先"
-  # 双栈都在时额外给出 IPv4 备用链接
+  print_qr "$link_primary" "REALITY"
   if is_ipv6 "$ip6" && is_ipv4 "$ip4"; then
     link_v4=$(build_vless_link "$ip4")
-    echo
-    echo -e "${C_DIM}备用 IPv4 链接:${C_RESET}"
-    echo "$link_v4"
+    echo -e "  ${C_DIM}IPv4 备用:${C_RESET}"
+    echo "  $link_v4"
   fi
-  echo -e "${C_GREEN}===============================================${C_RESET}"
 }
 
 show_hy2_link() {
-  if [[ "$(state_get HY2_INSTALLED)" != "1" ]] && [[ ! -f "${HY2_DIR}/config.yaml" ]]; then
-    log_warn "Hysteria2 未安装"
+  if [[ "$(state_get HY2_INSTALLED)" != "1" ]]; then
     return 0
   fi
   local ip6 ip4 link_primary link_v4
@@ -1792,40 +1867,28 @@ show_hy2_link() {
   else
     link_primary=$(build_hy2_link "${ip4:-$(get_public_ip)}")
   fi
-  echo
-  echo -e "${C_BOLD}${C_GREEN}======== Hysteria2 节点参数 ========${C_RESET}"
+  ui_section "Hysteria 2"
   print_address_summary
-  echo -e "  端口(UDP)  : $(state_get HY2_PORT)"
-  echo -e "  监听       : :$(state_get HY2_PORT) (双栈 IPv4+IPv6)"
-  echo -e "  密码       : $(state_get HY2_PASSWORD)"
-  echo -e "  SNI        : www.apple.com"
-  echo -e "  跳过证书验证: 是 (insecure=1，自签证书)"
-  echo -e "  伪装       : $(state_get HY2_MASQ)"
+  echo -e "  端口     ${C_GREEN}$(state_get HY2_PORT)/UDP${C_RESET}"
+  echo -e "  密码     $(state_get HY2_PASSWORD)"
+  echo -e "  SNI      www.apple.com  ·  insecure=1"
   local _tier _bw
-  _tier=$(state_get "HY2_TIER")
-  _bw=$(state_get "HY2_BW")
-  [[ -n "$_tier" ]] && echo -e "  性能档位   : ${_tier} · 带宽声明 ${_bw:-auto}"
+  _tier=$(state_get "HY2_TIER"); _bw=$(state_get "HY2_BW")
+  [[ -n "$_tier" ]] && echo -e "  档位     ${_tier} · ${_bw:-auto}"
+  hr
+  echo -e "  ${C_CYAN}导入链接${C_RESET}"
+  echo "  $link_primary"
   echo
-  if is_ipv6 "$ip6"; then
-    echo -e "${C_CYAN}导入链接 (IPv6 优先):${C_RESET}"
-  else
-    echo -e "${C_CYAN}导入链接 (IPv4):${C_RESET}"
-  fi
-  echo "$link_primary"
-  echo
-  print_qr "$link_primary" "Hy2 优先"
+  print_qr "$link_primary" "Hy2"
   if is_ipv6 "$ip6" && is_ipv4 "$ip4"; then
     link_v4=$(build_hy2_link "$ip4")
-    echo
-    echo -e "${C_DIM}备用 IPv4 链接:${C_RESET}"
-    echo "$link_v4"
+    echo -e "  ${C_DIM}IPv4 备用:${C_RESET}"
+    echo "  $link_v4"
   fi
-  echo -e "${C_GREEN}====================================${C_RESET}"
 }
 
 show_ws_link() {
   if [[ "$(state_get XRAY_WS_INSTALLED)" != "1" ]]; then
-    log_warn "VLESS+WS 未安装"
     return 0
   fi
   local host path port uuid link_cf link_direct ip4
@@ -1834,36 +1897,36 @@ show_ws_link() {
   port=$(state_get "XRAY_WS_PORT")
   uuid=$(state_get "XRAY_UUID")
   ip4=$(get_public_ipv4 2>/dev/null || true)
-  # CF 优选：地址先填域名（用户可改为优选 IP）
   link_cf=$(build_ws_link "$host")
   link_direct=$(build_ws_link "${ip4:-$host}" "direct")
+  ui_section "VLESS + WebSocket (CF)"
+  echo -e "  UUID     ${uuid}"
+  echo -e "  源站     ${C_GREEN}${port}${C_RESET}${path}"
+  echo -e "  Host     ${host}"
+  echo -e "  客户端   优选IP:443 · TLS · path/host 同上"
+  hr
+  echo -e "  ${C_CYAN}经 CF（地址可改为优选 IP）${C_RESET}"
+  echo "  $link_cf"
   echo
-  echo -e "${C_BOLD}${C_GREEN}======== VLESS + WebSocket（CF 优选 IP）========${C_RESET}"
-  echo -e "  UUID       : ${uuid}"
-  echo -e "  源站端口   : ${port}  (Xray 本机监听，CF 回源)"
-  echo -e "  Path       : ${path}"
-  echo -e "  Host       : ${host}"
-  echo -e "  传输       : ws"
-  echo
-  echo -e "${C_CYAN}【推荐】经 Cloudflare（客户端地址可改为优选 IP）:${C_RESET}"
-  echo -e "  地址=域名或 CF 优选 IP · 端口=443 · TLS=开启 · SNI/Host=${host}"
-  echo "$link_cf"
-  echo
-  print_qr "$link_cf" "VLESS-WS CF"
-  echo
-  echo -e "${C_DIM}【调试】直连源站（不经 CF）:${C_RESET}"
-  echo "$link_direct"
-  echo -e "${C_GREEN}================================================${C_RESET}"
+  print_qr "$link_cf" "VLESS-WS"
+  echo -e "  ${C_DIM}直连源站调试:${C_RESET}"
+  echo "  $link_direct"
 }
 
 show_all_links() {
+  local any=0
+  is_reality_installed && any=1
+  is_ws_installed && any=1
+  is_hy2_installed && any=1
+  if [[ $any -eq 0 ]]; then
+    ui_section "节点信息"
+    log_warn "尚未安装任何协议"
+    log_info "主菜单选 [1] 安装"
+    return 0
+  fi
   show_xray_link
   show_ws_link
   show_hy2_link
-  if [[ -f "${OPT_DIR}/README-TG.txt" ]]; then
-    echo
-    echo -e "${C_DIM}TG 加速资料: ${OPT_DIR}/README-TG.txt${C_RESET}"
-  fi
 }
 
 #-------------------------------------------------------------------------------
@@ -1871,14 +1934,14 @@ show_all_links() {
 #-------------------------------------------------------------------------------
 service_menu() {
   while true; do
+    ui_section "服务管理"
+    echo -e "  ${C_WHITE}[1]${C_RESET}  重启全部"
+    echo -e "  ${C_WHITE}[2]${C_RESET}  停止全部"
+    echo -e "  ${C_WHITE}[3]${C_RESET}  查看状态"
+    echo -e "  ${C_WHITE}[4]${C_RESET}  仅重启 Xray"
+    echo -e "  ${C_WHITE}[5]${C_RESET}  仅重启 Hysteria2"
+    echo -e "  ${C_WHITE}[0]${C_RESET}  返回"
     echo
-    echo -e "${C_BOLD}--- 服务运维 ---${C_RESET}"
-    echo "  1) 重启全部已装服务"
-    echo "  2) 停止全部已装服务"
-    echo "  3) 查看状态 (systemctl status)"
-    echo "  4) 仅重启 Xray"
-    echo "  5) 仅重启 Hysteria2"
-    echo "  0) 返回主菜单"
     local c
     c=$(ask "选择" "0")
     case "$c" in
@@ -1891,14 +1954,15 @@ service_menu() {
         svc_exists "$HY2_SVC" && systemctl stop "$HY2_SVC" && log_ok "Hy2 已停止" || true
         ;;
       3)
-        svc_exists "$XRAY_SVC" && systemctl status "$XRAY_SVC" --no-pager -l || true
-        svc_exists "$HY2_SVC" && systemctl status "$HY2_SVC" --no-pager -l || true
+        svc_exists "$XRAY_SVC" && systemctl --no-pager -l status "$XRAY_SVC" || true
+        svc_exists "$HY2_SVC" && systemctl --no-pager -l status "$HY2_SVC" || true
         ;;
       4) systemctl restart "$XRAY_SVC" && log_ok "Xray 已重启" || log_err "失败" ;;
       5) systemctl restart "$HY2_SVC" && log_ok "Hy2 已重启" || log_err "失败" ;;
       0) return 0 ;;
-      *) log_warn "无效选项" ;;
+      *) log_warn "请输入 0–5" ;;
     esac
+    echo
   done
 }
 
@@ -1941,20 +2005,18 @@ parse_multi_choice() {
 
 #---------- 安装：列出全部协议，多选要装哪些 ----------
 menu_install() {
-  echo
-  echo -e "${C_BOLD}--- 安装协议（可多选）---${C_RESET}"
-  echo -e "  [1] REALITY-Vision          当前: $(status_label xray)"
-  echo -e "  [2] Hysteria 2              当前: $(status_label hy2)"
-  echo -e "  [3] VLESS+WS（CF 优选 IP）  当前: $(status_label ws)"
-  echo
-  echo -e "  ${C_DIM}单选: 1     多选: 1 3  或  1,3  或  13${C_RESET}"
-  echo -e "  ${C_DIM}全选: a     返回: 0${C_RESET}"
-  echo
   local raw picks p t0 names=""
-  raw=$(ask "选择要【安装】的协议编号" "")
+  ui_section "安装协议"
+  echo -e "  ${C_WHITE}[1]${C_RESET}  REALITY-Vision       $(status_label xray)"
+  echo -e "  ${C_WHITE}[2]${C_RESET}  Hysteria 2           $(status_label hy2)"
+  echo -e "  ${C_WHITE}[3]${C_RESET}  VLESS+WS (CF优选)    $(status_label ws)"
+  hr
+  echo -e "  ${C_DIM}多选示例 ${C_CYAN}1 3${C_DIM}  ·  ${C_CYAN}13${C_DIM}  ·  全选 ${C_CYAN}a${C_DIM}  ·  返回 ${C_CYAN}0${C_RESET}"
+  echo
+  raw=$(ask "要安装哪些" "")
   [[ -z "$raw" || "$raw" == "0" ]] && { log_info "已取消"; return 0; }
   if ! picks=$(parse_multi_choice "$raw" "123"); then
-    log_warn "无效输入「${raw}」。请输入 1/2/3，多选用空格或逗号，例如: 1 3"
+    log_warn "请输入 1 / 2 / 3，多选如: 1 3"
     return 0
   fi
   for p in $picks; do
@@ -1964,10 +2026,10 @@ menu_install() {
       3) names+="VLESS-WS " ;;
     esac
   done
-  log_step "将安装: ${names}"
+  log_ok "计划安装: ${C_BOLD}${names}${C_RESET}"
+  log_info "端口与路径将自动随机生成（可回车确认或手改）"
   t0=$(date +%s)
   for p in $picks; do
-    echo
     case "$p" in
       1) install_reality ;;
       2) install_hysteria2 ;;
@@ -1975,90 +2037,61 @@ menu_install() {
     esac
   done
   echo
-  log_ok "安装流程结束（耗时 $(( $(date +%s) - t0 ))s）"
-  show_all_links
+  log_ok "全部完成 · ${C_DIM}$(( $(date +%s) - t0 ))s${C_RESET}"
 }
 
 #---------- 卸载：只列出【已安装】的协议，再多选 ----------
-# 动态编号 → 协议 id 映射写入临时关联（用平行数组）
 menu_uninstall() {
-  local ids=() labels=() allow="" i=0 n names="" raw picks p idx
-  echo
-  echo -e "${C_BOLD}--- 卸载协议（仅显示已安装，可多选）---${C_RESET}"
-
+  local ids=() labels=() allow="" i=0 names="" raw picks p idx
+  ui_section "卸载协议"
   if is_reality_installed; then
-    i=$((i + 1))
-    ids+=("reality")
-    labels+=("REALITY-Vision")
-    allow+="$i"
-    echo -e "  [${i}] REALITY-Vision     当前: $(status_label xray)"
+    i=$((i + 1)); ids+=("reality"); labels+=("REALITY"); allow+="$i"
+    echo -e "  ${C_WHITE}[${i}]${C_RESET}  REALITY-Vision     $(status_label xray)"
   fi
   if is_hy2_installed; then
-    i=$((i + 1))
-    ids+=("hy2")
-    labels+=("Hysteria 2")
-    allow+="$i"
-    echo -e "  [${i}] Hysteria 2         当前: $(status_label hy2)"
+    i=$((i + 1)); ids+=("hy2"); labels+=("Hy2"); allow+="$i"
+    echo -e "  ${C_WHITE}[${i}]${C_RESET}  Hysteria 2         $(status_label hy2)"
   fi
   if is_ws_installed; then
-    i=$((i + 1))
-    ids+=("ws")
-    labels+=("VLESS+WS")
-    allow+="$i"
-    echo -e "  [${i}] VLESS+WS           当前: $(status_label ws)"
+    i=$((i + 1)); ids+=("ws"); labels+=("VLESS-WS"); allow+="$i"
+    echo -e "  ${C_WHITE}[${i}]${C_RESET}  VLESS+WS           $(status_label ws)"
   fi
-
   if [[ $i -eq 0 ]]; then
     echo
-    log_warn "当前没有任何已安装协议，无需卸载。"
-    log_info "请先通过主菜单 [1] 安装协议。"
+    log_warn "没有已安装的协议"
+    log_info "请先选主菜单 [1] 安装"
     return 0
   fi
-
+  hr
+  echo -e "  ${C_DIM}多选编号 · 全选 ${C_CYAN}a${C_DIM} · 返回 ${C_CYAN}0${C_RESET}"
   echo
-  if [[ $i -eq 1 ]]; then
-    echo -e "  ${C_DIM}输入 ${allow} 卸载该项；a=卸载全部；0=返回${C_RESET}"
-  else
-    echo -e "  ${C_DIM}单选: ${allow:0:1}   多选: 如 $(echo "$allow" | sed 's/./& /g' | sed 's/ $//') 或连写 ${allow}${C_RESET}"
-    echo -e "  ${C_DIM}全选卸载: a    返回: 0${C_RESET}"
-  fi
-  echo
-
-  raw=$(ask "选择要【卸载】的编号" "")
+  raw=$(ask "要卸载哪些" "")
   [[ -z "$raw" || "$raw" == "0" ]] && { log_info "已取消"; return 0; }
-
   if ! picks=$(parse_multi_choice "$raw" "$allow"); then
-    log_warn "无效输入「${raw}」。只能选上面列出的已安装项编号。"
+    log_warn "只能选上面已列出的编号"
     return 0
   fi
-
-  names=""
   for p in $picks; do
     idx=$((p - 1))
     names+="${labels[idx]} "
   done
-  if ! confirm "确认卸载: ${names}？"; then
+  if ! confirm "确认卸载 ${C_BOLD}${names}${C_RESET}？"; then
     log_info "已取消"
     return 0
   fi
-
-  log_step "开始卸载: ${names}"
   for p in $picks; do
     idx=$((p - 1))
-    echo
     case "${ids[idx]}" in
       reality) uninstall_reality || true ;;
       hy2)     uninstall_hysteria2 || true ;;
       ws)      uninstall_vless_ws || true ;;
     esac
   done
-
-  # 若已全部卸完，再兜底清 TG（各卸载函数内也会 cleanup_tg_if_idle）
   if ! any_protocol_installed; then
     uninstall_tg_accel || true
-    log_ok "全部协议已卸完，TG 加速残留已清理"
+    log_ok "已全部卸载，TG 加速已清理"
   else
-    log_ok "所选协议卸载完成"
+    log_ok "卸载完成"
   fi
 }
 
@@ -2067,26 +2100,23 @@ menu_uninstall() {
 #-------------------------------------------------------------------------------
 print_banner() {
   clear 2>/dev/null || true
-  echo -e "${C_CYAN}${C_BOLD}"
-  cat <<'BANNER'
-╔══════════════════════════════════════════════════════════╗
-║         VPS Proxy Manager  ·  Debian 11/12/13            ║
-║     REALITY  ·  VLESS+WS(CF)  ·  Hysteria2  ·  TG        ║
-╚══════════════════════════════════════════════════════════╝
-BANNER
-  echo -e "${C_RESET}"
-  echo -e "  版本 ${SCRIPT_VERSION}  ·  沙盒 ${SANDBOX_ROOT}"
   echo
-  echo -e "  REALITY  : $(status_label xray)"
-  echo -e "  VLESS+WS : $(status_label ws)"
-  echo -e "  Hy2      : $(status_label hy2)"
+  echo -e "${C_CYAN}${C_BOLD}  ┌─────────────────────────────────────────────┐${C_RESET}"
+  echo -e "${C_CYAN}${C_BOLD}  │${C_RESET}  ${C_WHITE}VPS Proxy Manager${C_RESET}  ${C_DIM}v${SCRIPT_VERSION}${C_RESET}              ${C_CYAN}${C_BOLD}│${C_RESET}"
+  echo -e "${C_CYAN}${C_BOLD}  │${C_RESET}  ${C_DIM}Debian 11/12/13 · 随机高位端口${C_RESET}          ${C_CYAN}${C_BOLD}│${C_RESET}"
+  echo -e "${C_CYAN}${C_BOLD}  └─────────────────────────────────────────────┘${C_RESET}"
   echo
-  echo -e "${C_BOLD}菜单${C_RESET}"
-  echo "  [1] 安装   — 选择要安装的协议（可多选）"
-  echo "  [2] 卸载   — 仅列出已安装协议（可多选）"
-  echo "  [3] 节点参数 / 导入链接 / 二维码"
-  echo "  [4] 服务重启 / 停止 / 状态"
-  echo "  [0] 退出"
+  echo -e "  ${C_DIM}协议状态${C_RESET}"
+  printf "  %-12s %b\n" "REALITY"  "$(status_label xray)"
+  printf "  %-12s %b\n" "VLESS+WS" "$(status_label ws)"
+  printf "  %-12s %b\n" "Hysteria2" "$(status_label hy2)"
+  echo
+  hr
+  echo -e "  ${C_WHITE}${C_BOLD}[1]${C_RESET}  安装协议     ${C_DIM}可多选，端口/路径自动随机${C_RESET}"
+  echo -e "  ${C_WHITE}${C_BOLD}[2]${C_RESET}  卸载协议     ${C_DIM}只显示已安装项${C_RESET}"
+  echo -e "  ${C_WHITE}${C_BOLD}[3]${C_RESET}  节点与链接   ${C_DIM}参数 / 导入 URI / 二维码${C_RESET}"
+  echo -e "  ${C_WHITE}${C_BOLD}[4]${C_RESET}  服务管理     ${C_DIM}重启 / 停止 / 状态${C_RESET}"
+  echo -e "  ${C_WHITE}${C_BOLD}[0]${C_RESET}  退出"
   echo
 }
 
@@ -2094,7 +2124,7 @@ main_loop() {
   while true; do
     print_banner
     local choice
-    choice=$(ask "请输入选项" "")
+    choice=$(ask "请选择" "")
     echo
     case "$choice" in
       1)  menu_install ;;
@@ -2102,15 +2132,15 @@ main_loop() {
       3)  show_all_links ;;
       4)  service_menu ;;
       0|q|Q)
+        echo
         log_info "再见"
         exit 0
         ;;
       *)
-        log_warn "无效选项: ${choice}（请输入 0-4）"
+        log_warn "请输入 0–4"
         ;;
     esac
-    echo
-    _tty_read "$(echo -e "${C_DIM}按 Enter 返回主菜单...${C_RESET}")" >/dev/null || true
+    pause_return
   done
 }
 
