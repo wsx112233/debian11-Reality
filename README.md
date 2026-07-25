@@ -7,12 +7,10 @@
 
 | 协议 | 说明 |
 |------|------|
-| **REALITY-Vision** | `VLESS + TCP + REALITY + xtls-rprx-vision` |
-| **VLESS + WebSocket** | 可走 **Cloudflare 优选 IP**（橙云回源） |
+| **REALITY-Vision**
+| **VLESS + WebSocket**
 | **Hysteria 2** | QUIC 抗丢包 |
 
-- **TG 加速**：安装任一协议时**静默启用**（CIDR 资料 + UDP 友好缓冲），菜单不展示；**全部协议卸载后一并清干净**
-- **不安装** Cloudflare WARP，**不提供** BBR/WARP 独立菜单
 - 沙盒：`/etc/vps_proxy_mgr/` · `/usr/local/bin/vps_*`
 - 节点链接：**有公网 IPv6 则优先 IPv6**
 
