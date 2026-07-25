@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.6.1"
+readonly SCRIPT_VERSION="1.6.2"
+# Cloudflare 橙云 HTTP 回源允许的端口（Flexible 源站无 TLS 时必须用这些）
+# 文档: https://developers.cloudflare.com/fundamentals/reference/network-ports/
+readonly CF_HTTP_ORIGIN_PORTS=(80 8080 8880 2052 2082 2086 2095)
 readonly SANDBOX_ROOT="/etc/vps_proxy_mgr"
 readonly BIN_DIR="/usr/local/bin"
 readonly XRAY_BIN="${BIN_DIR}/vps_xray"
@@ -231,6 +234,50 @@ pick_ws_path() {
   [[ "$path" == /* ]] || path="/${path}"
   path=$(echo "$path" | tr -d '[:space:]')
   printf '%s\n' "$path"
+}
+
+# CF 兼容源站端口：优先 8080，再在允许列表中找空闲
+# 高位端口（如 44303）CF 橙云无法回源 → 客户端 Latency/Speed Error
+pick_cf_origin_port() {
+  local p suggested
+  for p in "${CF_HTTP_ORIGIN_PORTS[@]}"; do
+    if ! port_in_use "$p" "tcp"; then
+      suggested="$p"
+      break
+    fi
+  done
+  if [[ -z "${suggested:-}" ]]; then
+    log_warn "CF 常用回源端口均被占用，请停掉占用进程或手填" >&2
+    suggested="8080"
+  fi
+  echo -e "  ${C_DIM}VLESS+WS 源站须用 CF 允许端口: 80/8080/8880/2052/2082/2086/2095${C_RESET}" >&2
+  echo -e "  ${C_DIM}（高位端口如 44303 橙云无法回源，会导致测速全 Error）${C_RESET}" >&2
+  while true; do
+    p=$(ask "源站端口（回车采用 ${suggested}）" "$suggested")
+    if ! [[ "$p" =~ ^[0-9]+$ ]] || (( p < 1 || p > 65535 )); then
+      log_warn "请输入有效端口" >&2
+      continue
+    fi
+    local ok=0 x
+    for x in "${CF_HTTP_ORIGIN_PORTS[@]}"; do
+      [[ "$p" == "$x" ]] && ok=1 && break
+    done
+    if [[ $ok -ne 1 ]]; then
+      log_warn "端口 ${p} 不在 CF HTTP 回源列表，橙云将无法连接源站" >&2
+      if ! confirm "仍要使用？（不推荐，走 CF 会失败）"; then
+        continue
+      fi
+    fi
+    if port_in_use "$p" "tcp"; then
+      log_warn "端口 ${p} 已被占用" >&2
+      port_who "$p" "tcp" | sed 's/^/    /' >&2 || true
+      if ! confirm "仍要使用？"; then
+        continue
+      fi
+    fi
+    printf '%s\n' "$p"
+    return 0
+  done
 }
 
 # 生成随机字符串
@@ -1360,7 +1407,7 @@ install_vless_ws() {
   local t0 port path host uuid def_host
   t0=$(date +%s)
   ui_section "安装 VLESS + WebSocket（CF 优选 IP）"
-  log_info "源站随机高位端口 + 随机 path · 客户端连 CF:443"
+  log_info "源站用 CF 允许端口(默认 8080) + 随机 path · 客户端连 CF:443"
   ensure_sandbox
   install_deps
 
@@ -1375,10 +1422,16 @@ install_vless_ws() {
     state_set "XRAY_WS_INSTALLED" "0"
   fi
 
-  port=$(pick_port "tcp" "VLESS+WS 源站")
+  # 必须用 CF HTTP 回源端口，不能用随机高位（44303 等橙云连不上）
+  port=$(pick_cf_origin_port)
   path=$(pick_ws_path)
   def_host=$(get_public_ipv4 2>/dev/null || get_public_ip)
-  host=$(ask "域名 Host（CF 解析到本机；可先填 IP）" "$def_host")
+  host=$(ask "域名 Host（CF 解析到本机）" "${def_host}")
+  # 若用户填了 IP，提醒应使用已橙云的域名
+  if is_ipv4 "$host" || is_ipv6 "$host"; then
+    log_warn "Host 填的是 IP；走 CF 时客户端 Host/SNI 应使用域名（如 yx.xxx.com）"
+    host=$(ask "请填写 CF 域名（可再确认）" "$host")
+  fi
 
   if [[ ! -x "$XRAY_BIN" ]]; then
     install_xray_binary
@@ -1395,7 +1448,8 @@ install_vless_ws() {
 
   echo
   log_ok "VLESS+WS 完成 · 源站 ${port}${path} · Host ${host}"
-  log_info "CF：橙云 → 回源 ${port}；客户端地址=优选 IP，端口 443，TLS 开"
+  log_info "CF 必做: ①橙云 ②SSL=Flexible ③安全组放行 TCP ${port} ④客户端 443+TLS"
+  log_info "客户端 path=${path} · 无 flow · Host/SNI=${host}"
   show_ws_link
 }
 
@@ -2193,9 +2247,10 @@ show_ws_link() {
   link_direct=$(build_ws_link "${ip4:-$host}" "direct")
   ui_section "VLESS + WebSocket (CF)"
   echo -e "  UUID     ${uuid}"
-  echo -e "  源站     ${C_GREEN}${port}${C_RESET}${path}"
+  echo -e "  源站     ${C_GREEN}${port}${C_RESET}${path}  ${C_DIM}(CF 须能回源此端口)${C_RESET}"
   echo -e "  Host     ${host}"
-  echo -e "  客户端   优选IP:443 · TLS · path/host 同上"
+  echo -e "  客户端   域名或优选IP · 443 · TLS · 无 flow"
+  echo -e "  CF SSL   ${C_YELLOW}Flexible${C_RESET}（源站无证书）· 安全组放行 ${port}/tcp"
   hr
   echo -e "  ${C_CYAN}经 CF（地址可改为优选 IP）${C_RESET}"
   echo "  $link_cf"
