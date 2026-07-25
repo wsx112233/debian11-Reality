@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.5.0"
+readonly SCRIPT_VERSION="1.6.0"
 readonly SANDBOX_ROOT="/etc/vps_proxy_mgr"
 readonly BIN_DIR="/usr/local/bin"
 readonly XRAY_BIN="${BIN_DIR}/vps_xray"
@@ -787,11 +787,20 @@ fw_remove() {
 }
 
 fw_remove_all_recorded() {
-  local rules port proto r
+  local rules port proto r start end
   rules=$(state_get "FW_RULES")
   IFS=',' read -ra arr <<< "$rules"
   for r in "${arr[@]}"; do
     [[ -z "$r" ]] && continue
+    # range:30000-32000/udp
+    if [[ "$r" == range:* ]]; then
+      r="${r#range:}"
+      port="${r%/*}"
+      proto="${r#*/}"
+      start="${port%-*}"; end="${port#*-}"
+      [[ "$proto" == "udp" ]] && fw_remove_udp_range "$start" "$end" "vps_proxy_mgr_hy2_hop" || true
+      continue
+    fi
     port="${r%/*}"
     proto="${r#*/}"
     case "$proto" in
@@ -803,6 +812,7 @@ fw_remove_all_recorded() {
       *)   fw_remove "$port" "$proto" "vps_proxy_mgr" || true ;;
     esac
   done
+  remove_hy2_port_hop 2>/dev/null || true
   nft delete table inet vps_proxy_mgr 2>/dev/null || true
   state_set "FW_RULES" ""
 }
@@ -1204,15 +1214,15 @@ EOF
   fi
 }
 
-# 静默启用 TG 加速资料（不装 WARP、不改 BBR 菜单；不破坏系统路由）
+# 静默启用 TG 加速资料（不破坏系统路由/DNS）
 ensure_tg_accel() {
-  if [[ "$(state_get TG_ACCEL)" == "1" ]] && [[ -f "${OPT_DIR}/telegram_cidrs.txt" ]]; then
-    return 0
-  fi
   write_tg_cidr_hint
-  # 轻量 UDP 缓冲（仅写入我们的 sysctl 文件；不强制改已有拥塞控制以外的系统策略）
-  # 若文件已存在则刷新缓冲相关项；全协议卸载时会删除
-  apply_tg_sysctl_quiet
+  # 若已装 Hy2，用加强版 sysctl；否则轻量缓冲
+  if [[ "$(state_get HY2_INSTALLED)" == "1" ]]; then
+    apply_hy2_perf_sysctl
+  else
+    apply_tg_sysctl_quiet
+  fi
   state_set "TG_ACCEL" "1"
 }
 
@@ -1448,9 +1458,11 @@ install_hy2_binary() {
 }
 
 gen_hy2_cert() {
-  # REALITY 禁用微软系 SNI；Hy2 伪装站点使用 Apple 等大厂 HTTPS
-  local masq_host="www.apple.com"
-  log_info "生成自签名证书 (CN=${masq_host})"
+  # 伪装目标：随机大厂 HTTPS（非微软），抗主动探测
+  local pool=("www.apple.com" "www.cloudflare.com" "www.amazon.com" "www.google.com" "gateway.icloud.com")
+  local masq_host
+  masq_host="${pool[$((RANDOM % ${#pool[@]}))]}"
+  log_info "自签证书 + 伪装站点 CN=${masq_host}"
   openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -days 3650 \
     -keyout "${HY2_DIR}/server.key" \
@@ -1461,10 +1473,198 @@ gen_hy2_cert() {
   state_set "HY2_MASQ" "https://${masq_host}"
 }
 
+# 生成端口跳跃区间（高位、避开主端口，宽度约 2000）
+random_hop_range() {
+  local main_port="${1:-0}"
+  local span=2000 start end tries=0
+  while (( tries < 40 )); do
+    start=$(( PORT_HIGH_MIN + RANDOM % (PORT_HIGH_MAX - PORT_HIGH_MIN - span) ))
+    end=$(( start + span - 1 ))
+    if (( end > PORT_HIGH_MAX )); then
+      end=$PORT_HIGH_MAX
+      start=$(( end - span + 1 ))
+    fi
+    # 主监听端口不要落在跳跃段内（主端口单独放行，跳跃段 REDIRECT 到主端口）
+    if (( main_port < start || main_port > end )); then
+      echo "${start}-${end}"
+      return 0
+    fi
+    tries=$((tries + 1))
+  done
+  echo "30000-32000"
+}
+
+# 防火墙放行 UDP 端口段
+fw_allow_udp_range() {
+  local start="$1" end="$2" comment="${3:-vps_proxy_mgr_hy2_hop}"
+  detect_firewall quiet
+  case "$FW_BACKEND" in
+    ufw)
+      ufw allow "${start}:${end}/udp" comment "$comment" >/dev/null 2>&1 || true
+      log_ok "UFW 已放行 UDP ${start}-${end}"
+      ;;
+    nft)
+      nft list table inet vps_proxy_mgr &>/dev/null || nft add table inet vps_proxy_mgr 2>/dev/null || true
+      nft list chain inet vps_proxy_mgr input &>/dev/null || \
+        nft 'add chain inet vps_proxy_mgr input { type filter hook input priority -10; policy accept; }' 2>/dev/null || true
+      nft add rule inet vps_proxy_mgr input udp dport "${start}-${end}" counter accept comment \""${comment}"\" 2>/dev/null || true
+      log_ok "nftables 已放行 UDP ${start}-${end}"
+      ;;
+    iptables)
+      if ! iptables -C INPUT -p udp --dport "${start}:${end}" -m comment --comment "$comment" -j ACCEPT 2>/dev/null; then
+        iptables -I INPUT -p udp --dport "${start}:${end}" -m comment --comment "$comment" -j ACCEPT
+      fi
+      if command -v ip6tables &>/dev/null; then
+        if ! ip6tables -C INPUT -p udp --dport "${start}:${end}" -m comment --comment "$comment" -j ACCEPT 2>/dev/null; then
+          ip6tables -I INPUT -p udp --dport "${start}:${end}" -m comment --comment "$comment" -j ACCEPT 2>/dev/null || true
+        fi
+      fi
+      log_ok "iptables 已放行 UDP ${start}-${end}"
+      ;;
+    *) log_warn "请手动放行 UDP ${start}-${end}" ;;
+  esac
+  local rec
+  rec=$(state_get "FW_RULES")
+  state_set "FW_RULES" "${rec}range:${start}-${end}/udp,"
+}
+
+fw_remove_udp_range() {
+  local start="$1" end="$2" comment="${3:-vps_proxy_mgr_hy2_hop}"
+  detect_firewall quiet
+  case "$FW_BACKEND" in
+    ufw)
+      ufw delete allow "${start}:${end}/udp" >/dev/null 2>&1 || true
+      ;;
+    nft)
+      local handles h
+      handles=$(nft -a list chain inet vps_proxy_mgr input 2>/dev/null \
+        | grep -E "udp dport ${start}-${end}|dport \\{ ${start}" \
+        | grep -oE 'handle [0-9]+' | awk '{print $2}' || true)
+      for h in $handles; do
+        nft delete rule inet vps_proxy_mgr input handle "$h" 2>/dev/null || true
+      done
+      ;;
+    iptables)
+      while iptables -C INPUT -p udp --dport "${start}:${end}" -m comment --comment "$comment" -j ACCEPT 2>/dev/null; do
+        iptables -D INPUT -p udp --dport "${start}:${end}" -m comment --comment "$comment" -j ACCEPT 2>/dev/null || break
+      done
+      if command -v ip6tables &>/dev/null; then
+        while ip6tables -C INPUT -p udp --dport "${start}:${end}" -m comment --comment "$comment" -j ACCEPT 2>/dev/null; do
+          ip6tables -D INPUT -p udp --dport "${start}:${end}" -m comment --comment "$comment" -j ACCEPT 2>/dev/null || break
+        done
+      fi
+      ;;
+  esac
+}
+
+# 端口跳跃：将 hop 段 UDP REDIRECT 到主监听端口（客户端跳端口，服务端单进程）
+setup_hy2_port_hop() {
+  local main_port="$1" hop_start="$2" hop_end="$3"
+  local cmt="vps_proxy_mgr_hy2_hop"
+  # IPv4
+  if command -v iptables &>/dev/null; then
+    # 先清旧规则再加
+    while iptables -t nat -C PREROUTING -p udp --dport "${hop_start}:${hop_end}" -m comment --comment "$cmt" -j REDIRECT --to-ports "$main_port" 2>/dev/null; do
+      iptables -t nat -D PREROUTING -p udp --dport "${hop_start}:${hop_end}" -m comment --comment "$cmt" -j REDIRECT --to-ports "$main_port" 2>/dev/null || break
+    done
+    iptables -t nat -A PREROUTING -p udp --dport "${hop_start}:${hop_end}" -m comment --comment "$cmt" -j REDIRECT --to-ports "$main_port"
+  fi
+  if command -v ip6tables &>/dev/null; then
+    while ip6tables -t nat -C PREROUTING -p udp --dport "${hop_start}:${hop_end}" -m comment --comment "$cmt" -j REDIRECT --to-ports "$main_port" 2>/dev/null; do
+      ip6tables -t nat -D PREROUTING -p udp --dport "${hop_start}:${hop_end}" -m comment --comment "$cmt" -j REDIRECT --to-ports "$main_port" 2>/dev/null || break
+    done
+    ip6tables -t nat -A PREROUTING -p udp --dport "${hop_start}:${hop_end}" -m comment --comment "$cmt" -j REDIRECT --to-ports "$main_port" 2>/dev/null || true
+  fi
+  if command -v netfilter-persistent &>/dev/null; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+  fi
+  fw_allow_udp_range "$hop_start" "$hop_end" "$cmt"
+  state_set "HY2_HOP" "1"
+  state_set "HY2_HOP_START" "$hop_start"
+  state_set "HY2_HOP_END" "$hop_end"
+  log_ok "端口跳跃已启用: UDP ${hop_start}-${hop_end} → ${main_port}"
+}
+
+remove_hy2_port_hop() {
+  local main_port hop_start hop_end cmt="vps_proxy_mgr_hy2_hop"
+  main_port=$(state_get "HY2_PORT")
+  hop_start=$(state_get "HY2_HOP_START")
+  hop_end=$(state_get "HY2_HOP_END")
+  [[ -z "$hop_start" || -z "$hop_end" ]] && {
+    state_set "HY2_HOP" "0"
+    return 0
+  }
+  if command -v iptables &>/dev/null && [[ -n "$main_port" ]]; then
+    while iptables -t nat -C PREROUTING -p udp --dport "${hop_start}:${hop_end}" -m comment --comment "$cmt" -j REDIRECT --to-ports "$main_port" 2>/dev/null; do
+      iptables -t nat -D PREROUTING -p udp --dport "${hop_start}:${hop_end}" -m comment --comment "$cmt" -j REDIRECT --to-ports "$main_port" 2>/dev/null || break
+    done
+  fi
+  if command -v ip6tables &>/dev/null && [[ -n "$main_port" ]]; then
+    while ip6tables -t nat -C PREROUTING -p udp --dport "${hop_start}:${hop_end}" -m comment --comment "$cmt" -j REDIRECT --to-ports "$main_port" 2>/dev/null; do
+      ip6tables -t nat -D PREROUTING -p udp --dport "${hop_start}:${hop_end}" -m comment --comment "$cmt" -j REDIRECT --to-ports "$main_port" 2>/dev/null || break
+    done
+  fi
+  fw_remove_udp_range "$hop_start" "$hop_end" "$cmt" || true
+  if command -v netfilter-persistent &>/dev/null; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+  fi
+  state_set "HY2_HOP" "0"
+  state_set "HY2_HOP_START" ""
+  state_set "HY2_HOP_END" ""
+  log_ok "端口跳跃规则已移除"
+}
+
+# Hy2 专用：加强 UDP/QUIC 内核参数（在 TG 缓冲基础上叠加）
+apply_hy2_perf_sysctl() {
+  local tier rmax wmax
+  tier=$(mem_tier)
+  case "$tier" in
+    small)  rmax=8388608;  wmax=8388608 ;;
+    medium) rmax=16777216; wmax=16777216 ;;
+    *)      rmax=33554432; wmax=33554432 ;;
+  esac
+  cat > "$SYSCTL_FILE" <<EOF
+# Managed by vps_proxy_mgr — Hy2/TG performance — removed on full uninstall
+net.core.rmem_max = ${rmax}
+net.core.wmem_max = ${wmax}
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.optmem_max = 204800
+net.core.netdev_max_backlog = 250000
+net.core.somaxconn = 4096
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+net.ipv4.udp_mem = 65536 131072 262144
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.ip_local_port_range = 1024 65535
+EOF
+  modprobe tcp_bbr 2>/dev/null || true
+  local key val
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    key=$(echo "$line" | sed -E 's/^[[:space:]]*([^=[:space:]]+)[[:space:]]*=.*/\1/')
+    val=$(echo "$line" | sed -E 's/^[^=]+=[[:space:]]*//')
+    [[ -n "$key" && -n "$val" ]] || continue
+    sysctl -w "${key}=${val}" >/dev/null 2>&1 || true
+  done < "$SYSCTL_FILE"
+  # 网卡 offload
+  local iface
+  iface=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}' || true)
+  if [[ -n "$iface" ]] && command -v ethtool &>/dev/null; then
+    ethtool -K "$iface" gro on gso on tso on 2>/dev/null || true
+  fi
+  log_ok "已应用 Hy2 传输优化 sysctl（档位 ${tier} · rmem_max=${rmax}）"
+}
+
 write_hy2_config() {
   local port="$1"
   local password masq tier nic_mbps bw_up bw_down
   local sw_init sw_max cw_init cw_max streams
+  local obfs_pass obfs_block=""
   password=$(state_get "HY2_PASSWORD")
   if [[ -z "$password" ]]; then
     password=$(rand_password 24)
@@ -1473,27 +1673,38 @@ write_hy2_config() {
   masq=$(state_get "HY2_MASQ")
   [[ -z "$masq" ]] && masq="https://www.apple.com"
 
-  # 按内存分档 QUIC 窗口；按网卡速率设带宽（避免写死 1gbps 误导拥塞）
+  obfs_pass=$(state_get "HY2_OBFS")
+  if [[ -n "$obfs_pass" ]]; then
+    obfs_block=$(cat <<OBFS
+# Salamander 混淆 — 抗 DPI / 特征识别
+obfs:
+  type: salamander
+  salamander:
+    password: "${obfs_pass}"
+OBFS
+)
+  fi
+
+  # 按内存分档 QUIC 窗口（抗丢包拉大）
   tier=$(mem_tier)
   nic_mbps=$(detect_nic_mbps)
   case "$tier" in
     small)
-      sw_init=2097152; sw_max=4194304
-      cw_init=5242880; cw_max=10485760
-      streams=512
-      ;;
-    medium)
       sw_init=4194304; sw_max=8388608
       cw_init=10485760; cw_max=20971520
       streams=1024
       ;;
-    *)
+    medium)
       sw_init=8388608; sw_max=16777216
       cw_init=20971520; cw_max=41943040
       streams=2048
       ;;
+    *)
+      sw_init=16777216; sw_max=33554432
+      cw_init=41943040; cw_max=83886080
+      streams=4096
+      ;;
   esac
-  # 带宽声明：取网卡速率，最低 100 Mbps；格式 Hy2 可解析
   if (( nic_mbps >= 10000 )); then
     bw_up="10 gbps"; bw_down="10 gbps"
   elif (( nic_mbps >= 1000 )); then
@@ -1507,7 +1718,7 @@ write_hy2_config() {
 
   cat > "${HY2_DIR}/config.yaml" <<EOF
 # Hysteria 2 — managed by vps_proxy_mgr
-# 内核 UDP 缓冲见 ${SYSCTL_FILE}；档位 ${tier}
+# 传输优化 + 抗封锁（masquerade / 可选 obfs / 端口跳跃在 netfilter）
 listen: :${port}
 
 tls:
@@ -1518,19 +1729,22 @@ auth:
   type: password
   password: "${password}"
 
+${obfs_block}
+
+# 伪装成正常 HTTPS 站点，降低主动探测风险
 masquerade:
   type: proxy
   proxy:
     url: ${masq}
     rewriteHost: true
 
-# QUIC 窗口按内存分档（高丢包 / TG 视频友好）
+# QUIC 大窗口 — 高延迟/高丢包（TG 视频）更稳
 quic:
   initStreamReceiveWindow: ${sw_init}
   maxStreamReceiveWindow: ${sw_max}
   initConnReceiveWindow: ${cw_init}
   maxConnReceiveWindow: ${cw_max}
-  maxIdleTimeout: 30s
+  maxIdleTimeout: 60s
   maxIncomingStreams: ${streams}
   disablePathMTUDiscovery: false
 
@@ -1538,9 +1752,8 @@ bandwidth:
   up: ${bw_up}
   down: ${bw_down}
 
-# 以服务端带宽为准，避免客户端低估导致限速
 ignoreClientBandwidth: true
-udpIdleTimeout: 60s
+udpIdleTimeout: 90s
 EOF
   chmod 600 "${HY2_DIR}/config.yaml"
   state_set "HY2_PORT" "$port"
@@ -1565,11 +1778,11 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 NoNewPrivileges=true
 ExecStart=${HY2_BIN} server -c ${HY2_DIR}/config.yaml
 Restart=on-failure
-RestartSec=5s
+RestartSec=3s
 LimitNOFILE=1048576
-LimitNPROC=512
+LimitNPROC=65535
 TasksMax=infinity
-# 配合内核 rmem/wmem
+# UDP 高并发
 Environment=HYSTERIA_LOG_LEVEL=warn
 StandardOutput=append:${LOG_DIR}/hy2-stdout.log
 StandardError=append:${LOG_DIR}/hy2-stderr.log
@@ -1578,6 +1791,8 @@ ProtectSystem=full
 ProtectHome=true
 ReadWritePaths=${SANDBOX_ROOT}
 PrivateTmp=true
+# 更快恢复
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -1595,10 +1810,10 @@ EOF
 }
 
 install_hysteria2() {
-  local t0 port
+  local t0 port hop_on="0" hop_range hop_start hop_end obfs_on="0" obfs_pass
   t0=$(date +%s)
   ui_section "安装 Hysteria 2"
-  log_info "QUIC / UDP · 随机高位端口"
+  log_info "QUIC / UDP · 随机高位端口 · 可选端口跳跃 / 混淆"
   ensure_sandbox
   install_deps
 
@@ -1610,18 +1825,64 @@ install_hysteria2() {
     uninstall_hysteria2 || true
   fi
 
-  port=$(pick_port "udp" "Hysteria2")
+  port=$(pick_port "udp" "Hysteria2 主端口")
+
+  # —— 抗封锁可选项 ——
+  echo
+  log_info "抗封锁增强（均可跳过）"
+  if confirm "启用端口跳跃 Port Hopping？（推荐，抗 UDP QoS）"; then
+    hop_on="1"
+    hop_range=$(random_hop_range "$port")
+    hop_range=$(ask "跳跃端口段 start-end" "$hop_range")
+    if [[ "$hop_range" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      hop_start="${BASH_REMATCH[1]}"
+      hop_end="${BASH_REMATCH[2]}"
+      if (( hop_start >= hop_end || hop_start < 1 || hop_end > 65535 )); then
+        log_warn "端口段无效，已关闭跳跃"
+        hop_on="0"
+      elif (( port >= hop_start && port <= hop_end )); then
+        log_warn "主端口 ${port} 落在跳跃段内，已关闭跳跃"
+        hop_on="0"
+      fi
+    else
+      log_warn "格式应为 30000-32000，已关闭跳跃"
+      hop_on="0"
+    fi
+  fi
+
+  if confirm "启用 Salamander 混淆 obfs？（抗 DPI，客户端需填相同密码）"; then
+    obfs_on="1"
+    obfs_pass=$(rand_password 16)
+    obfs_pass=$(ask "obfs 密码（回车用随机）" "$obfs_pass")
+    state_set "HY2_OBFS" "$obfs_pass"
+  else
+    state_set "HY2_OBFS" ""
+  fi
 
   install_hy2_binary
   gen_hy2_cert
   write_hy2_config "$port"
   fw_allow "$port" "udp" "vps_proxy_mgr_hy2"
+
+  if [[ "$hop_on" == "1" ]]; then
+    setup_hy2_port_hop "$port" "$hop_start" "$hop_end"
+  else
+    state_set "HY2_HOP" "0"
+    state_set "HY2_HOP_START" ""
+    state_set "HY2_HOP_END" ""
+  fi
+
+  # 传输性能：Hy2 加强版 sysctl（覆盖/增强 TG 缓冲）
+  apply_hy2_perf_sysctl
   ensure_tg_accel
   write_hy2_systemd
 
   state_set "HY2_INSTALLED" "1"
   echo
-  log_ok "Hysteria2 完成 · UDP ${C_GREEN}${port}${C_RESET} · ${C_DIM}$(( $(date +%s) - t0 ))s${C_RESET}"
+  log_ok "Hysteria2 完成 · 主端口 UDP ${C_GREEN}${port}${C_RESET}"
+  [[ "$hop_on" == "1" ]] && log_ok "端口跳跃 ${hop_start}-${hop_end} → ${port}"
+  [[ "$obfs_on" == "1" ]] && log_ok "Salamander obfs 已开启"
+  log_info "耗时 $(( $(date +%s) - t0 ))s"
   show_hy2_link
 }
 
@@ -1629,6 +1890,7 @@ uninstall_hysteria2() {
   log_step "卸载 Hysteria2"
   local port
   port=$(state_get "HY2_PORT")
+  remove_hy2_port_hop || true
   if svc_exists "$HY2_SVC"; then
     systemctl stop "$HY2_SVC" 2>/dev/null || true
     systemctl disable "$HY2_SVC" 2>/dev/null || true
@@ -1644,6 +1906,10 @@ uninstall_hysteria2() {
   state_set "HY2_MASQ" ""
   state_set "HY2_TIER" ""
   state_set "HY2_BW" ""
+  state_set "HY2_OBFS" ""
+  state_set "HY2_HOP" "0"
+  state_set "HY2_HOP_START" ""
+  state_set "HY2_HOP_END" ""
   cleanup_tg_if_idle
   log_ok "Hysteria2 已彻底卸载"
 }
@@ -1771,19 +2037,32 @@ build_vless_link() {
 
 # 按指定地址构建 Hy2 链接（$1 可选，默认优先 IPv6）
 build_hy2_link() {
-  local ip host port pass name tag
+  local ip host port pass name tag qs obfs hop_s hop_e mport
   ip="${1:-}"
   [[ -z "$ip" ]] && ip=$(get_public_ip)
   host=$(format_host_for_uri "$ip")
   port=$(state_get "HY2_PORT")
   pass=$(state_get "HY2_PASSWORD")
+  obfs=$(state_get "HY2_OBFS")
+  hop_s=$(state_get "HY2_HOP_START")
+  hop_e=$(state_get "HY2_HOP_END")
   if is_ipv6 "$ip"; then
     tag="Hy2-IPv6"
   else
     tag="Hy2-IPv4"
   fi
+  # 端口跳跃：URI 使用 hop 段，客户端在区间内跳端口
+  mport="$port"
+  if [[ "$(state_get HY2_HOP)" == "1" && -n "$hop_s" && -n "$hop_e" ]]; then
+    mport="${hop_s}-${hop_e}"
+    tag="${tag}-hop"
+  fi
   name=$(urlencode "$tag")
-  echo "hysteria2://${pass}@${host}:${port}?insecure=1&sni=www.apple.com#${name}"
+  qs="insecure=1&sni=www.apple.com"
+  if [[ -n "$obfs" ]]; then
+    qs+="&obfs=salamander&obfs-password=$(urlencode "$obfs")"
+  fi
+  echo "hysteria2://${pass}@${host}:${mport}?${qs}#${name}"
 }
 
 # VLESS+WS 链接：地址可用 CF 优选 IP；Host/SNI 用域名
@@ -1869,8 +2148,18 @@ show_hy2_link() {
   fi
   ui_section "Hysteria 2"
   print_address_summary
-  echo -e "  端口     ${C_GREEN}$(state_get HY2_PORT)/UDP${C_RESET}"
+  echo -e "  主端口   ${C_GREEN}$(state_get HY2_PORT)/UDP${C_RESET}"
+  if [[ "$(state_get HY2_HOP)" == "1" ]]; then
+    echo -e "  端口跳跃 ${C_GREEN}$(state_get HY2_HOP_START)-$(state_get HY2_HOP_END)${C_RESET} → 主端口（抗 QoS）"
+  else
+    echo -e "  端口跳跃 ${C_DIM}未启用${C_RESET}"
+  fi
   echo -e "  密码     $(state_get HY2_PASSWORD)"
+  if [[ -n "$(state_get HY2_OBFS)" ]]; then
+    echo -e "  混淆     salamander · $(state_get HY2_OBFS)"
+  else
+    echo -e "  混淆     ${C_DIM}未启用${C_RESET}"
+  fi
   echo -e "  SNI      www.apple.com  ·  insecure=1"
   local _tier _bw
   _tier=$(state_get "HY2_TIER"); _bw=$(state_get "HY2_BW")
