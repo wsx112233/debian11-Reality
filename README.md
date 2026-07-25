@@ -24,26 +24,37 @@
 
 ## 快速开始
 
-```bash
-# 方式一：curl 一键拉取并运行（推荐）
-curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/proxy_manager.sh \
-  -o proxy_manager.sh
-chmod +x proxy_manager.sh
-sudo ./proxy_manager.sh
-```
+**最短一行（推荐）：**
 
 ```bash
-# 方式二：克隆仓库
+curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash
+```
+
+等价写法：
+
+```bash
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get)
+```
+
+> 需 `bash` + `curl`。菜单从 `/dev/tty` 读入，支持管道安装。
+
+**直接拉主脚本：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/proxy_manager.sh | sudo bash
+```
+
+**克隆本地：**
+
+```bash
 git clone https://github.com/wsx112233/debian11-Reality.git
-cd debian11-Reality
-chmod +x proxy_manager.sh
-sudo ./proxy_manager.sh
+cd debian11-Reality && sudo bash proxy_manager.sh
 ```
 
 ```bash
-# 仅查看组件状态
-sudo ./proxy_manager.sh --status
-sudo ./proxy_manager.sh -v
+# 状态 / 版本（本地文件）
+sudo bash proxy_manager.sh --status
+sudo bash proxy_manager.sh -v
 ```
 
 ---

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# 最短安装入口（引导到 proxy_manager.sh）
+#   curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash
+#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get)
+set -euo pipefail
+URL="https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/proxy_manager.sh"
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "请用 root 运行，例如：" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash" >&2
+  exit 1
+fi
+# 下载到临时文件再执行，避免部分环境 process substitution 异常
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+curl -fsSL "$URL" -o "$tmp"
+bash "$tmp" "$@"

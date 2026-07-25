@@ -90,16 +90,27 @@ die() {
   exit 1
 }
 
+# 从终端读入（兼容 curl|bash / bash <(curl) 管道场景）
+_tty_read() {
+  local prompt="$1" reply=""
+  if [[ -r /dev/tty ]]; then
+    read -r -p "$prompt" reply < /dev/tty || true
+  else
+    read -r -p "$prompt" reply || true
+  fi
+  printf '%s' "$reply"
+}
+
 # 安全读取（兼容 set -u）
 ask() {
   local prompt="$1"
   local default="${2:-}"
   local reply
   if [[ -n "$default" ]]; then
-    read -r -p "$(echo -e "${C_YELLOW}${prompt}${C_RESET} [${default}]: ")" reply || true
+    reply=$(_tty_read "$(echo -e "${C_YELLOW}${prompt}${C_RESET} [${default}]: ")")
     echo "${reply:-$default}"
   else
-    read -r -p "$(echo -e "${C_YELLOW}${prompt}${C_RESET}: ")" reply || true
+    reply=$(_tty_read "$(echo -e "${C_YELLOW}${prompt}${C_RESET}: ")")
     echo "${reply:-}"
   fi
 }
@@ -107,7 +118,7 @@ ask() {
 confirm() {
   local prompt="$1"
   local reply
-  read -r -p "$(echo -e "${C_YELLOW}${prompt} [y/N]${C_RESET}: ")" reply || true
+  reply=$(_tty_read "$(echo -e "${C_YELLOW}${prompt} [y/N]${C_RESET}: ")")
   [[ "${reply,,}" == "y" || "${reply,,}" == "yes" ]]
 }
 
@@ -325,7 +336,8 @@ detect_arch() {
 #-------------------------------------------------------------------------------
 check_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    die "请使用 root 权限运行：sudo $0"
+    die "请使用 root 运行，一行安装：
+  sudo bash <(curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/proxy_manager.sh)"
   fi
 }
 
@@ -1909,7 +1921,7 @@ main_loop() {
         ;;
     esac
     echo
-    read -r -p "$(echo -e "${C_DIM}按 Enter 返回主菜单...${C_RESET}")" _ || true
+    _tty_read "$(echo -e "${C_DIM}按 Enter 返回主菜单...${C_RESET}")" >/dev/null || true
   done
 }
 
