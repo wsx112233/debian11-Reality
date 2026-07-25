@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.4.0"
 readonly SANDBOX_ROOT="/etc/vps_proxy_mgr"
 readonly BIN_DIR="/usr/local/bin"
 readonly XRAY_BIN="${BIN_DIR}/vps_xray"
 readonly HY2_BIN="${BIN_DIR}/vps_hysteria"
-readonly WARP_BIN="${BIN_DIR}/vps_warp-cli"
 readonly XRAY_DIR="${SANDBOX_ROOT}/xray"
 readonly HY2_DIR="${SANDBOX_ROOT}/hysteria2"
-readonly WARP_DIR="${SANDBOX_ROOT}/warp"
 readonly OPT_DIR="${SANDBOX_ROOT}/optimize"
 readonly LOG_DIR="${SANDBOX_ROOT}/logs"
 readonly CACHE_DIR="${SANDBOX_ROOT}/cache"
 readonly STATE_FILE="${SANDBOX_ROOT}/state.env"
+# 旧版 WARP 残留清理用（不再安装）
+readonly WARP_DIR="${SANDBOX_ROOT}/warp"
 
 # 安装速度相关：缓存 TTL（秒）
 readonly IP_CACHE_TTL=600
@@ -25,7 +25,6 @@ readonly DL_MAX_TIME=180
 
 readonly XRAY_SVC="xray-custom.service"
 readonly HY2_SVC="hy2-custom.service"
-readonly WARP_SVC="warp-custom.service"
 readonly SYSCTL_FILE="/etc/sysctl.d/99-vps-proxy-mgr.conf"
 
 readonly XRAY_GITHUB_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -368,10 +367,19 @@ check_debian() {
 }
 
 ensure_sandbox() {
-  mkdir -p "$SANDBOX_ROOT" "$XRAY_DIR" "$HY2_DIR" "$WARP_DIR" "$OPT_DIR" "$LOG_DIR" "$CACHE_DIR"
+  mkdir -p "$SANDBOX_ROOT" "$XRAY_DIR" "$HY2_DIR" "$OPT_DIR" "$LOG_DIR" "$CACHE_DIR"
   chmod 700 "$SANDBOX_ROOT"
   touch "$STATE_FILE"
   chmod 600 "$STATE_FILE"
+}
+
+# 是否仍有任一协议在装
+any_protocol_installed() {
+  [[ "$(state_get XRAY_INSTALLED)" == "1" ]] \
+    || [[ "$(state_get XRAY_WS_INSTALLED)" == "1" ]] \
+    || [[ "$(state_get HY2_INSTALLED)" == "1" ]] \
+    || svc_exists "$XRAY_SVC" \
+    || svc_exists "$HY2_SVC"
 }
 
 # 状态读写（简单 key=value）
@@ -478,10 +486,21 @@ svc_exists() {
 }
 
 status_label() {
-  local name="$1"  # xray | hy2 | warp | bbr
+  local name="$1"  # xray | ws | hy2
   case "$name" in
     xray)
-      if [[ -x "$XRAY_BIN" ]] && svc_exists "$XRAY_SVC"; then
+      if [[ "$(state_get XRAY_INSTALLED)" == "1" ]] && [[ -x "$XRAY_BIN" ]] && svc_exists "$XRAY_SVC"; then
+        if svc_active "$XRAY_SVC"; then
+          echo -e "${C_GREEN}运行中${C_RESET}"
+        else
+          echo -e "${C_YELLOW}已停止${C_RESET}"
+        fi
+      else
+        echo -e "${C_DIM}未安装${C_RESET}"
+      fi
+      ;;
+    ws)
+      if [[ "$(state_get XRAY_WS_INSTALLED)" == "1" ]] && [[ -x "$XRAY_BIN" ]] && svc_exists "$XRAY_SVC"; then
         if svc_active "$XRAY_SVC"; then
           echo -e "${C_GREEN}运行中${C_RESET}"
         else
@@ -500,28 +519,6 @@ status_label() {
         fi
       else
         echo -e "${C_DIM}未安装${C_RESET}"
-      fi
-      ;;
-    warp)
-      if [[ -f "${WARP_DIR}/installed" ]] || command -v warp-cli &>/dev/null; then
-        if svc_active "warp-svc" 2>/dev/null || svc_active "$WARP_SVC" 2>/dev/null; then
-          echo -e "${C_GREEN}运行中${C_RESET}"
-        else
-          echo -e "${C_YELLOW}已安装/停止${C_RESET}"
-        fi
-      else
-        echo -e "${C_DIM}未安装${C_RESET}"
-      fi
-      ;;
-    bbr)
-      local cc
-      cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-      if [[ "$cc" == "bbr" ]] && [[ -f "$SYSCTL_FILE" ]]; then
-        echo -e "${C_GREEN}已启用(BBR)${C_RESET}"
-      elif [[ -f "$SYSCTL_FILE" ]]; then
-        echo -e "${C_YELLOW}配置已写入${C_RESET}"
-      else
-        echo -e "${C_DIM}未调优${C_RESET}"
       fi
       ;;
   esac
@@ -707,7 +704,10 @@ fw_remove_all_recorded() {
     port="${r%/*}"
     proto="${r#*/}"
     case "$proto" in
-      tcp) fw_remove "$port" "tcp" "vps_proxy_mgr_xray" || true ;;
+      tcp)
+        fw_remove "$port" "tcp" "vps_proxy_mgr_xray" || true
+        fw_remove "$port" "tcp" "vps_proxy_mgr_ws" || true
+        ;;
       udp) fw_remove "$port" "udp" "vps_proxy_mgr_hy2" || true ;;
       *)   fw_remove "$port" "$proto" "vps_proxy_mgr" || true ;;
     esac
@@ -918,24 +918,124 @@ gen_xray_keys() {
   fi
   [[ -n "$priv" && -n "$pub" ]] || die "解析 x25519 密钥失败: $out"
 
-  uuid=$("$XRAY_BIN" uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid)
+  # 保留已有 UUID（与 VLESS+WS 共用，避免重装 REALITY 冲掉 WS 客户端）
+  uuid=$(state_get "XRAY_UUID")
+  if [[ -z "$uuid" ]]; then
+    uuid=$("$XRAY_BIN" uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid)
+    state_set "XRAY_UUID" "$uuid"
+  fi
   short_id=$(rand_hex 16)
 
   state_set "XRAY_PRIVKEY" "$priv"
   state_set "XRAY_PUBKEY" "$pub"
-  state_set "XRAY_UUID" "$uuid"
   state_set "XRAY_SHORTID" "$short_id"
-  log_ok "已生成 UUID / x25519 / shortId"
+  log_ok "已生成 x25519 / shortId（UUID=${uuid}）"
 }
 
-write_xray_config() {
-  local port="$1" sni="$2"
-  local uuid priv short_id
+# 确保 Xray UUID（REALITY / WS 共用一份 UUID 亦可，此处各自可独立）
+ensure_xray_uuid() {
+  local uuid
   uuid=$(state_get "XRAY_UUID")
-  priv=$(state_get "XRAY_PRIVKEY")
-  short_id=$(state_get "XRAY_SHORTID")
+  if [[ -z "$uuid" ]]; then
+    if [[ -x "$XRAY_BIN" ]]; then
+      uuid=$("$XRAY_BIN" uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid)
+    else
+      uuid=$(cat /proc/sys/kernel/random/uuid)
+    fi
+    state_set "XRAY_UUID" "$uuid"
+  fi
+  echo "$uuid"
+}
 
-  # access 日志默认关闭，减少磁盘 I/O，利于高并发传输
+# 根据 state 重写 xray 配置（支持 REALITY 与/或 VLESS+WS 双入站）
+rebuild_xray_config() {
+  local uuid r_port r_sni r_priv r_sid
+  local w_port w_path w_host
+  local inbounds="" need=0
+
+  ensure_sandbox
+  uuid=$(ensure_xray_uuid)
+
+  if [[ "$(state_get XRAY_INSTALLED)" == "1" ]]; then
+    r_port=$(state_get "XRAY_PORT")
+    r_sni=$(state_get "XRAY_SNI")
+    r_priv=$(state_get "XRAY_PRIVKEY")
+    r_sid=$(state_get "XRAY_SHORTID")
+    [[ -n "$r_port" && -n "$r_priv" ]] || die "REALITY 状态不完整，请重装"
+    need=1
+    inbounds+=$(cat <<EOF
+    {
+      "tag": "vless-reality",
+      "listen": "::",
+      "port": ${r_port},
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "${uuid}", "flow": "xtls-rprx-vision" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "${r_sni}:443",
+          "xver": 0,
+          "serverNames": ["${r_sni}"],
+          "privateKey": "${r_priv}",
+          "shortIds": ["", "${r_sid}"]
+        }
+      },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
+    }
+EOF
+)
+  fi
+
+  if [[ "$(state_get XRAY_WS_INSTALLED)" == "1" ]]; then
+    w_port=$(state_get "XRAY_WS_PORT")
+    w_path=$(state_get "XRAY_WS_PATH")
+    w_host=$(state_get "XRAY_WS_HOST")
+    [[ -n "$w_port" && -n "$w_path" ]] || die "VLESS+WS 状态不完整，请重装"
+    need=1
+    [[ -n "$inbounds" ]] && inbounds+=","
+    # 无 TLS：便于 Cloudflare 橙云 Flexible / 或客户端直连后自建 CDN TLS
+    # 推荐：CF 源站 HTTP，客户端连 CF 优选 IP + 域名 TLS
+    inbounds+=$(cat <<EOF
+    {
+      "tag": "vless-ws",
+      "listen": "::",
+      "port": ${w_port},
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "${uuid}" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "${w_path}",
+          "headers": { "Host": "${w_host}" }
+        }
+      },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
+    }
+EOF
+)
+  fi
+
+  if [[ "$need" -eq 0 ]]; then
+    # 无入站：停服务但不删二进制（可能仅剩 hy2）
+    if svc_exists "$XRAY_SVC"; then
+      systemctl stop "$XRAY_SVC" 2>/dev/null || true
+      systemctl disable "$XRAY_SVC" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${XRAY_SVC}"
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+    rm -f "${XRAY_DIR}/config.json"
+    return 0
+  fi
+
   cat > "${XRAY_DIR}/config.json" <<EOF
 {
   "log": {
@@ -944,73 +1044,29 @@ write_xray_config() {
     "error": "${LOG_DIR}/xray-error.log"
   },
   "inbounds": [
-    {
-      "listen": "::",
-      "port": ${port},
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${uuid}",
-            "flow": "xtls-rprx-vision"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "${sni}:443",
-          "xver": 0,
-          "serverNames": [
-            "${sni}"
-          ],
-          "privateKey": "${priv}",
-          "shortIds": [
-            "",
-            "${short_id}"
-          ]
-        }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
-      }
-    }
+${inbounds}
   ],
   "outbounds": [
     {
       "protocol": "freedom",
       "tag": "direct",
-      "settings": {
-        "domainStrategy": "AsIs"
-      },
+      "settings": { "domainStrategy": "AsIs" },
       "streamSettings": {
-        "sockopt": {
-          "tcpFastOpen": true,
-          "tcpNoDelay": true
-        }
+        "sockopt": { "tcpFastOpen": true, "tcpNoDelay": true }
       }
     },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
-    }
+    { "protocol": "blackhole", "tag": "block" }
   ]
 }
 EOF
   chmod 600 "${XRAY_DIR}/config.json"
-  state_set "XRAY_PORT" "$port"
-  state_set "XRAY_SNI" "$sni"
-  log_ok "Xray REALITY 配置已写入 ${XRAY_DIR}/config.json"
+  log_ok "Xray 配置已更新 ${XRAY_DIR}/config.json"
 }
 
 write_xray_systemd() {
   cat > "/etc/systemd/system/${XRAY_SVC}" <<EOF
 [Unit]
-Description=VPS Proxy Manager - Xray REALITY-Vision
+Description=VPS Proxy Manager - Xray (REALITY / VLESS-WS)
 Documentation=https://github.com/XTLS/Xray-core
 After=network-online.target
 Wants=network-online.target
@@ -1029,8 +1085,6 @@ LimitNPROC=512
 TasksMax=infinity
 StandardOutput=append:${LOG_DIR}/xray-stdout.log
 StandardError=append:${LOG_DIR}/xray-stderr.log
-
-# 轻量隔离：不破坏出站解析与 TLS 握手所需系统路径
 ProtectSystem=full
 ProtectHome=true
 ReadWritePaths=${SANDBOX_ROOT}
@@ -1039,12 +1093,13 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-  # 启动前校验配置（兼容不同 xray 子命令）
-  if "$XRAY_BIN" run -test -c "${XRAY_DIR}/config.json" >/dev/null 2>&1 \
-    || "$XRAY_BIN" -test -config "${XRAY_DIR}/config.json" >/dev/null 2>&1; then
-    log_ok "Xray 配置语法校验通过"
-  else
-    log_warn "无法执行配置测试（或测试失败），仍将尝试启动服务"
+  if [[ -f "${XRAY_DIR}/config.json" ]]; then
+    if "$XRAY_BIN" run -test -c "${XRAY_DIR}/config.json" >/dev/null 2>&1 \
+      || "$XRAY_BIN" -test -config "${XRAY_DIR}/config.json" >/dev/null 2>&1; then
+      log_ok "Xray 配置语法校验通过"
+    else
+      log_warn "无法执行配置测试（或测试失败），仍将尝试启动服务"
+    fi
   fi
   systemctl daemon-reload
   systemctl enable --now "$XRAY_SVC"
@@ -1058,36 +1113,109 @@ EOF
   fi
 }
 
+# 静默启用 TG 加速资料（不装 WARP、不改 BBR 菜单；不破坏系统路由）
+ensure_tg_accel() {
+  if [[ "$(state_get TG_ACCEL)" == "1" ]] && [[ -f "${OPT_DIR}/telegram_cidrs.txt" ]]; then
+    return 0
+  fi
+  write_tg_cidr_hint
+  # 轻量 UDP 缓冲（仅写入我们的 sysctl 文件；不强制改已有拥塞控制以外的系统策略）
+  # 若文件已存在则刷新缓冲相关项；全协议卸载时会删除
+  apply_tg_sysctl_quiet
+  state_set "TG_ACCEL" "1"
+}
+
+# 仅写对 TG/UDP 友好的缓冲参数（不提供菜单、不装 WARP）
+apply_tg_sysctl_quiet() {
+  local tier rmax wmax
+  tier=$(mem_tier)
+  case "$tier" in
+    small)  rmax=4194304;  wmax=4194304 ;;
+    medium) rmax=8388608;  wmax=8388608 ;;
+    *)      rmax=16777216; wmax=16777216 ;;
+  esac
+  # 若用户系统已是 bbr 则保持；我们只保证缓冲与 fq 对 UDP 友好
+  cat > "$SYSCTL_FILE" <<EOF
+# Managed by vps_proxy_mgr (TG/UDP buffers) — removed on full uninstall
+net.core.rmem_max = ${rmax}
+net.core.wmem_max = ${wmax}
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+net.core.netdev_max_backlog = 8192
+EOF
+  local key val
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    key=$(echo "$line" | sed -E 's/^[[:space:]]*([^=[:space:]]+)[[:space:]]*=.*/\1/')
+    val=$(echo "$line" | sed -E 's/^[^=]+=[[:space:]]*//')
+    [[ -n "$key" && -n "$val" ]] || continue
+    sysctl -w "${key}=${val}" >/dev/null 2>&1 || true
+  done < "$SYSCTL_FILE"
+}
+
+# 全部协议卸完后清理 TG 加速残留
+cleanup_tg_if_idle() {
+  if any_protocol_installed; then
+    return 0
+  fi
+  uninstall_tg_accel
+}
+
+uninstall_tg_accel() {
+  # 只清本脚本写入的文件；不 purge 用户自装 WARP；清理旧版残留目录
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    rm -f "$SYSCTL_FILE"
+    sysctl --system >/dev/null 2>&1 || true
+  fi
+  rm -rf "$OPT_DIR"
+  # 旧版 WARP 沙盒残留（我们不再安装，但全清时去掉）
+  if [[ -d "$WARP_DIR" ]]; then
+    rm -rf "$WARP_DIR"
+  fi
+  rm -f /etc/apt/sources.list.d/vps-cloudflare-warp.list 2>/dev/null || true
+  state_set "TG_ACCEL" "0"
+  state_set "OPT_INSTALLED" "0"
+  state_set "BBR_APPLIED" "0"
+  state_set "WARP_INSTALLED" "0"
+  state_set "WARP_SOCKS" ""
+}
+
 install_reality() {
-  local t0
+  local t0 port sni
   t0=$(date +%s)
   log_step "安装 Xray REALITY-Vision (VLESS + TCP + REALITY + Vision)"
   ensure_sandbox
   install_deps
 
-  if [[ "$(state_get XRAY_INSTALLED)" == "1" ]] || svc_exists "$XRAY_SVC"; then
+  if [[ "$(state_get XRAY_INSTALLED)" == "1" ]]; then
     log_warn "检测到已安装 REALITY"
     if ! confirm "是否覆盖重装？"; then
       return 0
     fi
-    uninstall_reality || true
+    # 仅卸 REALITY 入站，保留 WS
+    local oldp
+    oldp=$(state_get "XRAY_PORT")
+    [[ -n "$oldp" ]] && fw_remove "$oldp" "tcp" "vps_proxy_mgr_xray" || true
+    state_set "XRAY_INSTALLED" "0"
   fi
 
-  local port sni
   port=$(prompt_port "tcp" "443" "REALITY TCP 端口")
   sni=$(pick_sni)
 
-  install_xray_binary
-  gen_xray_keys
-  write_xray_config "$port" "$sni"
-  fw_allow "$port" "tcp" "vps_proxy_mgr_xray"
-  # 传输性能：装协议时自动套用内核调优（已调优则跳过写文件）
-  if [[ "$(state_get BBR_APPLIED)" != "1" ]]; then
-    apply_kernel_tune
+  if [[ ! -x "$XRAY_BIN" ]]; then
+    install_xray_binary
   fi
+  gen_xray_keys
+  state_set "XRAY_PORT" "$port"
+  state_set "XRAY_SNI" "$sni"
+  state_set "XRAY_INSTALLED" "1"
+  rebuild_xray_config
+  fw_allow "$port" "tcp" "vps_proxy_mgr_xray"
+  ensure_tg_accel
   write_xray_systemd
 
-  state_set "XRAY_INSTALLED" "1"
   log_ok "REALITY-Vision 安装完成（耗时 $(( $(date +%s) - t0 ))s）"
   show_xray_link
 }
@@ -1096,23 +1224,98 @@ uninstall_reality() {
   log_step "卸载 Xray REALITY"
   local port
   port=$(state_get "XRAY_PORT")
-  if svc_exists "$XRAY_SVC"; then
-    systemctl stop "$XRAY_SVC" 2>/dev/null || true
-    systemctl disable "$XRAY_SVC" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${XRAY_SVC}"
-    systemctl daemon-reload
-  fi
   [[ -n "$port" ]] && fw_remove "$port" "tcp" "vps_proxy_mgr_xray" || true
-  rm -f "$XRAY_BIN"
-  rm -rf "$XRAY_DIR"
   state_set "XRAY_INSTALLED" "0"
   state_set "XRAY_PORT" ""
-  state_set "XRAY_UUID" ""
   state_set "XRAY_PRIVKEY" ""
   state_set "XRAY_PUBKEY" ""
   state_set "XRAY_SHORTID" ""
   state_set "XRAY_SNI" ""
-  log_ok "Xray REALITY 已彻底卸载"
+  # 若 WS 仍在，只重建配置；否则停 xray 并视情况删二进制
+  if [[ "$(state_get XRAY_WS_INSTALLED)" == "1" ]]; then
+    rebuild_xray_config
+    systemctl restart "$XRAY_SVC" 2>/dev/null || write_xray_systemd
+  else
+    if svc_exists "$XRAY_SVC"; then
+      systemctl stop "$XRAY_SVC" 2>/dev/null || true
+      systemctl disable "$XRAY_SVC" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${XRAY_SVC}"
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+    rm -f "$XRAY_BIN"
+    rm -rf "$XRAY_DIR"
+    state_set "XRAY_UUID" ""
+  fi
+  cleanup_tg_if_idle
+  log_ok "Xray REALITY 已卸载"
+}
+
+install_vless_ws() {
+  local t0 port path host uuid
+  t0=$(date +%s)
+  log_step "安装 VLESS + WebSocket（可走 Cloudflare 优选 IP）"
+  ensure_sandbox
+  install_deps
+
+  if [[ "$(state_get XRAY_WS_INSTALLED)" == "1" ]]; then
+    log_warn "检测到已安装 VLESS+WS"
+    if ! confirm "是否覆盖重装？"; then
+      return 0
+    fi
+    local oldp
+    oldp=$(state_get "XRAY_WS_PORT")
+    [[ -n "$oldp" ]] && fw_remove "$oldp" "tcp" "vps_proxy_mgr_ws" || true
+    state_set "XRAY_WS_INSTALLED" "0"
+  fi
+
+  port=$(prompt_port "tcp" "8080" "VLESS+WS 源站端口（CF 回源常用 80/8080）")
+  path=$(ask "WebSocket path（以 / 开头）" "/$(rand_hex 8)")
+  [[ "$path" == /* ]] || path="/${path}"
+  host=$(ask "Host / 域名（CF 解析到本机的域名，可先填 IP）" "$(get_public_ipv4 2>/dev/null || get_public_ip)")
+
+  if [[ ! -x "$XRAY_BIN" ]]; then
+    install_xray_binary
+  fi
+  uuid=$(ensure_xray_uuid)
+  state_set "XRAY_WS_PORT" "$port"
+  state_set "XRAY_WS_PATH" "$path"
+  state_set "XRAY_WS_HOST" "$host"
+  state_set "XRAY_WS_INSTALLED" "1"
+  rebuild_xray_config
+  fw_allow "$port" "tcp" "vps_proxy_mgr_ws"
+  ensure_tg_accel
+  write_xray_systemd
+
+  log_ok "VLESS+WS 安装完成（耗时 $(( $(date +%s) - t0 ))s）"
+  log_info "CF 面板：DNS 橙云代理 → 源站 ${host}:${port}，SSL 建议 Full；客户端地址填 CF 优选 IP，Host/SNI 填域名"
+  show_ws_link
+}
+
+uninstall_vless_ws() {
+  log_step "卸载 VLESS+WS"
+  local port
+  port=$(state_get "XRAY_WS_PORT")
+  [[ -n "$port" ]] && fw_remove "$port" "tcp" "vps_proxy_mgr_ws" || true
+  state_set "XRAY_WS_INSTALLED" "0"
+  state_set "XRAY_WS_PORT" ""
+  state_set "XRAY_WS_PATH" ""
+  state_set "XRAY_WS_HOST" ""
+  if [[ "$(state_get XRAY_INSTALLED)" == "1" ]]; then
+    rebuild_xray_config
+    systemctl restart "$XRAY_SVC" 2>/dev/null || write_xray_systemd
+  else
+    if svc_exists "$XRAY_SVC"; then
+      systemctl stop "$XRAY_SVC" 2>/dev/null || true
+      systemctl disable "$XRAY_SVC" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${XRAY_SVC}"
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+    rm -f "$XRAY_BIN"
+    rm -rf "$XRAY_DIR"
+    state_set "XRAY_UUID" ""
+  fi
+  cleanup_tg_if_idle
+  log_ok "VLESS+WS 已卸载"
 }
 
 #-------------------------------------------------------------------------------
@@ -1323,9 +1526,7 @@ install_hysteria2() {
   gen_hy2_cert
   write_hy2_config "$port"
   fw_allow "$port" "udp" "vps_proxy_mgr_hy2"
-  if [[ "$(state_get BBR_APPLIED)" != "1" ]]; then
-    apply_kernel_tune
-  fi
+  ensure_tg_accel
   write_hy2_systemd
 
   state_set "HY2_INSTALLED" "1"
@@ -1350,239 +1551,36 @@ uninstall_hysteria2() {
   state_set "HY2_PORT" ""
   state_set "HY2_PASSWORD" ""
   state_set "HY2_MASQ" ""
+  state_set "HY2_TIER" ""
+  state_set "HY2_BW" ""
+  cleanup_tg_if_idle
   log_ok "Hysteria2 已彻底卸载"
 }
 
 #-------------------------------------------------------------------------------
-#  内核 BBR + UDP 缓冲 + Telegram 路由提示 / WARP
+#  Telegram 加速资料（静默，无菜单）
 #-------------------------------------------------------------------------------
-apply_kernel_tune() {
-  local tier rmax wmax rdef wdef backlog tcp_rmem tcp_wmem ct_max optmem
-  tier=$(mem_tier)
-  log_step "应用内核 BBR + UDP 缓冲（档位: ${tier}）"
-
-  case "$tier" in
-    small)
-      # <1GiB：保守，避免 OOM
-      rmax=4194304; wmax=4194304
-      rdef=262144; wdef=262144
-      backlog=4096; optmem=65536
-      tcp_rmem="4096 87380 4194304"
-      tcp_wmem="4096 65536 4194304"
-      ct_max=262144
-      ;;
-    medium)
-      rmax=8388608; wmax=8388608
-      rdef=524288; wdef=524288
-      backlog=8192; optmem=131072
-      tcp_rmem="4096 87380 8388608"
-      tcp_wmem="4096 65536 8388608"
-      ct_max=524288
-      ;;
-    *)
-      rmax=16777216; wmax=16777216
-      rdef=1048576; wdef=1048576
-      backlog=16384; optmem=204800
-      tcp_rmem="4096 87380 16777216"
-      tcp_wmem="4096 65536 16777216"
-      ct_max=1048576
-      ;;
-  esac
-
-  cat > "$SYSCTL_FILE" <<EOF
-# Managed by vps_proxy_mgr — tier=${tier} — safe to delete on uninstall
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-
-# socket 缓冲（Hy2/QUIC/TG 视频）
-net.core.rmem_max = ${rmax}
-net.core.wmem_max = ${wmax}
-net.core.rmem_default = ${rdef}
-net.core.wmem_default = ${wdef}
-net.core.optmem_max = ${optmem}
-net.core.netdev_max_backlog = ${backlog}
-net.core.somaxconn = 4096
-
-# UDP 最小缓冲
-net.ipv4.udp_rmem_min = 8192
-net.ipv4.udp_wmem_min = 8192
-
-# TCP
-net.ipv4.tcp_rmem = ${tcp_rmem}
-net.ipv4.tcp_wmem = ${tcp_wmem}
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_notsent_lowat = 16384
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_keepalive_time = 600
-net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.ip_local_port_range = 1024 65535
-
-# 连接跟踪
-net.netfilter.nf_conntrack_max = ${ct_max}
-EOF
-
-  modprobe tcp_bbr 2>/dev/null || true
-  modprobe nf_conntrack 2>/dev/null || true
-  local key val
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-    key=$(echo "$line" | sed -E 's/^[[:space:]]*([^=[:space:]]+)[[:space:]]*=.*/\1/')
-    val=$(echo "$line" | sed -E 's/^[^=]+=[[:space:]]*//')
-    [[ -n "$key" && -n "$val" ]] || continue
-    sysctl -w "${key}=${val}" >/dev/null 2>&1 || true
-  done < "$SYSCTL_FILE"
-  sysctl --system >/dev/null 2>&1 || true
-
-  # 默认路由网卡：开启 gro/gso/tso（失败忽略，虚拟网卡可能不支持）
-  local iface
-  iface=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}' || true)
-  if [[ -n "$iface" ]] && command -v ethtool &>/dev/null; then
-    ethtool -K "$iface" gro on gso on tso on 2>/dev/null || true
-    log_info "网卡 ${iface} offload 已尝试开启 (gro/gso/tso)"
-  fi
-
-  local cc
-  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "?")
-  if [[ "$cc" == "bbr" ]]; then
-    log_ok "BBR 已启用 · qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null) · rmem_max=${rmax}"
-  else
-    log_warn "当前拥塞控制为 ${cc}（部分内核需重启后 BBR 才生效）"
-  fi
-  state_set "BBR_APPLIED" "1"
-  state_set "TUNE_TIER" "$tier"
-}
-
 write_tg_cidr_hint() {
-  # 输出客户端分流参考与可选 ipset 说明（不强制改路由表，避免破坏系统）
+  # 仅写客户端分流参考，不改系统路由/DNS，不破坏现有环境
   local f="${OPT_DIR}/telegram_cidrs.txt"
   mkdir -p "$OPT_DIR"
   {
     echo "# Telegram Official CIDRs (AS62041 / AS59930 etc.)"
-    echo "# 客户端建议：将这些网段走代理/WARP，或在路由规则中优先走优质出口"
+    echo "# 客户端：将这些网段 / 域名走已安装代理即可加速 TG"
     printf '%s\n' "${TG_CIDRS[@]}"
   } > "$f"
-
   cat > "${OPT_DIR}/README-TG.txt" <<EOF
-Telegram 专项加速说明
-====================
-1. 内核层：已通过 ${SYSCTL_FILE} 启用 BBR + 扩大 UDP 缓冲，
-   缓解 Hysteria2 / TG 视频高丢包下的卡顿。
-
-2. 路由层（推荐客户端分流）：
-   - 将 ${f} 中的 CIDR 加入客户端「代理规则 / 域名策略」
-   - 或启用下方 WARP Socks5，把 TG 域名/IP 指向 127.0.0.1:40000
-
-3. Cloudflare 优选 IP 思路：
-   - 使用优选工具测出延迟最低的 CF 任播 IP
-   - 在客户端将 *.telegram.org / t.me 等解析或路由指向该 IP 再走代理
-
-4. 服务端不强制劫持 TG 流量，避免影响其他业务与系统路由。
+Telegram 加速（随协议静默安装）
+================================
+1. 服务端已写入 UDP 友好缓冲（${SYSCTL_FILE}），改善 Hy2 / TG 视频卡顿。
+2. 客户端请将下列域名与 ${f} 中 CIDR 走代理：
+   telegram.org, t.me, td.telegram.org, telegra.ph,
+   *.telegram.org, *.t.me
+3. 使用 VLESS+WS + Cloudflare 时：客户端地址填 CF 优选 IP，
+   Host/SNI 填你的域名，path 与面板一致。
+4. 本脚本不劫持系统路由、不改 resolv.conf、不装 WARP。
+5. 全部协议卸载后，上述文件与 sysctl 片段会一并删除。
 EOF
-  log_ok "TG CIDR 列表已写入 ${f}"
-}
-
-_install_warp_core() {
-  # 官方 deb 源（Debian）— 仅添加专用 list/keyring，不改系统其它源
-  if ! command -v warp-cli &>/dev/null; then
-    log_info "添加 Cloudflare WARP apt 源..."
-    ensure_sandbox
-    local arch keyring codename
-    arch=$(dpkg --print-architecture)
-    # shellcheck source=/dev/null
-    . /etc/os-release
-    codename="${VERSION_CODENAME:-bookworm}"
-    # Trixie 若官方尚未提供源，回退 bookworm 包
-    case "$codename" in
-      trixie|sid) codename="bookworm" ;;
-    esac
-    keyring="/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg"
-    mkdir -p /usr/share/keyrings "${WARP_DIR}"
-    if command -v gpg &>/dev/null; then
-      curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor -o "$keyring" 2>/dev/null || true
-    else
-      apt-get install -y -qq gnupg >/dev/null 2>&1 || true
-      curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor -o "$keyring" 2>/dev/null || true
-    fi
-    if [[ ! -s "$keyring" ]]; then
-      log_warn "WARP GPG 密钥获取失败，跳过 WARP"
-      return 0
-    fi
-    echo "deb [signed-by=${keyring} arch=${arch}] https://pkg.cloudflareclient.com/ ${codename} main" \
-      > /etc/apt/sources.list.d/vps-cloudflare-warp.list
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq || true
-    if ! apt-get install -y -qq cloudflare-warp; then
-      log_warn "WARP 官方包安装失败（源或架构问题）。将仅保留内核调优。"
-      rm -f /etc/apt/sources.list.d/vps-cloudflare-warp.list
-      return 0
-    fi
-  fi
-
-  systemctl enable --now warp-svc 2>/dev/null || true
-  sleep 2
-  # 非交互注册（兼容多版本 warp-cli）
-  warp-cli --accept-tos registration new 2>/dev/null \
-    || yes | warp-cli registration new 2>/dev/null \
-    || true
-  warp-cli mode proxy 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
-  warp-cli proxy port 40000 2>/dev/null || warp-cli set-proxy-port 40000 2>/dev/null || true
-  warp-cli connect 2>/dev/null || true
-
-  mkdir -p "${WARP_DIR}"
-  echo "1" > "${WARP_DIR}/installed"
-  state_set "WARP_SOCKS" "127.0.0.1:40000"
-  state_set "WARP_INSTALLED" "1"
-  log_ok "WARP 代理模式已尝试启动 · Socks5 127.0.0.1:40000"
-  log_info "客户端可将 Telegram 流量指向该 Socks5，或配合规则分流 TG CIDR"
-}
-
-install_warp_optional() {
-  log_step "Cloudflare WARP 本地 Socks5（可选）"
-  if ! confirm "是否安装 Cloudflare WARP（warp-cli）用于 TG 专线 Socks5？"; then
-    log_info "已跳过 WARP 安装，仅保留内核调优与 TG CIDR 提示"
-    write_tg_cidr_hint
-    return 0
-  fi
-  _install_warp_core
-  write_tg_cidr_hint
-}
-
-install_optimize() {
-  apply_kernel_tune
-  install_warp_optional
-  state_set "OPT_INSTALLED" "1"
-  log_ok "网络优化 / TG 加速模块处理完成"
-}
-
-uninstall_optimize() {
-  log_step "卸载 WARP / 网络优化"
-  # 还原 sysctl
-  if [[ -f "$SYSCTL_FILE" ]]; then
-    rm -f "$SYSCTL_FILE"
-    sysctl --system >/dev/null 2>&1 || true
-    log_ok "已删除 ${SYSCTL_FILE} 并重新加载 sysctl"
-  fi
-  # WARP
-  if [[ -f "${WARP_DIR}/installed" ]] || [[ -f /etc/apt/sources.list.d/vps-cloudflare-warp.list ]]; then
-    warp-cli disconnect 2>/dev/null || true
-    systemctl stop warp-svc 2>/dev/null || true
-    systemctl disable warp-svc 2>/dev/null || true
-    # 不强制 purge 系统包，避免误伤用户自行安装的 WARP；仅移除我们加的源
-    rm -f /etc/apt/sources.list.d/vps-cloudflare-warp.list
-    if confirm "是否 apt purge 卸载 cloudflare-warp 软件包？"; then
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get purge -y -qq cloudflare-warp 2>/dev/null || true
-      apt-get autoremove -y -qq 2>/dev/null || true
-    fi
-  fi
-  rm -rf "$WARP_DIR" "$OPT_DIR"
-  state_set "OPT_INSTALLED" "0"
-  state_set "BBR_APPLIED" "0"
-  state_set "WARP_INSTALLED" "0"
-  state_set "WARP_SOCKS" ""
-  log_ok "网络优化 / WARP 已清理（内核拥塞控制可能仍为 bbr，属无害状态）"
 }
 
 #-------------------------------------------------------------------------------
@@ -1591,18 +1589,12 @@ uninstall_optimize() {
 install_all() {
   local t0
   t0=$(date +%s)
-  log_step "一键组合安装：REALITY + Hy2 + TG加速 + 内核调优"
-  # 先调优内核，后续单装模块会跳过重复 sysctl
-  apply_kernel_tune
+  log_step "一键组合安装：REALITY + VLESS-WS + Hy2（TG 加速默认静默启用）"
   install_reality
   echo
-  install_hysteria2
+  install_vless_ws
   echo
-  write_tg_cidr_hint
-  state_set "OPT_INSTALLED" "1"
-  if confirm "是否同时安装 Cloudflare WARP Socks5（TG 专线）？"; then
-    _install_warp_core
-  fi
+  install_hysteria2
   echo
   log_ok "========== 组合安装全部完成（总耗时 $(( $(date +%s) - t0 ))s）=========="
   show_all_links
@@ -1610,35 +1602,34 @@ install_all() {
 
 uninstall_all() {
   log_step "彻底一键清理所有组件与残留"
-  if ! confirm "确认删除 REALITY / Hy2 / WARP / 内核调优 / 沙盒目录？"; then
+  if ! confirm "确认删除 REALITY / VLESS-WS / Hy2 / TG加速 与沙盒目录？"; then
     log_info "已取消"
     return 0
   fi
   uninstall_reality || true
+  uninstall_vless_ws || true
   uninstall_hysteria2 || true
-  uninstall_optimize || true
+  uninstall_tg_accel || true
   fw_remove_all_recorded || true
-  # 清理日志与状态
   rm -rf "$SANDBOX_ROOT"
-  rm -f "$XRAY_BIN" "$HY2_BIN" "$WARP_BIN"
-  # systemd 兜底
-  rm -f "/etc/systemd/system/${XRAY_SVC}" "/etc/systemd/system/${HY2_SVC}" "/etc/systemd/system/${WARP_SVC}"
+  rm -f "$XRAY_BIN" "$HY2_BIN"
+  rm -f "/etc/systemd/system/${XRAY_SVC}" "/etc/systemd/system/${HY2_SVC}"
   systemctl daemon-reload 2>/dev/null || true
-  # 卸载后自检
   echo
   log_step "卸载后环境自检"
-  local dirty=0
+  local dirty=0 p
   for p in "$XRAY_BIN" "$HY2_BIN" "$SANDBOX_ROOT" "$SYSCTL_FILE" \
-           "/etc/systemd/system/${XRAY_SVC}" "/etc/systemd/system/${HY2_SVC}"; do
+           "/etc/systemd/system/${XRAY_SVC}" "/etc/systemd/system/${HY2_SVC}" \
+           "$OPT_DIR" "$WARP_DIR"; do
     if [[ -e "$p" ]]; then
       log_warn "仍存在: $p"
       dirty=1
     fi
   done
   if [[ $dirty -eq 0 ]]; then
-    log_ok "自检通过：沙盒与专属服务已清空，系统应恢复至安装前状态"
+    log_ok "自检通过：协议与 TG 加速残留已清空"
   else
-    log_warn "存在残留项，可手动 rm 删除（不会影响系统包）"
+    log_warn "存在残留项，可手动 rm（不影响系统包）"
   fi
 }
 
@@ -1701,8 +1692,35 @@ build_hy2_link() {
     tag="Hy2-IPv4"
   fi
   name=$(urlencode "$tag")
-  # IPv6: hysteria2://pass@[2001:db8::1]:443?insecure=1&sni=...
   echo "hysteria2://${pass}@${host}:${port}?insecure=1&sni=www.apple.com#${name}"
+}
+
+# VLESS+WS 链接：地址可用 CF 优选 IP；Host/SNI 用域名
+# $1=连接地址(可优选IP)  缺省用域名 Host
+build_ws_link() {
+  local addr host_hdr path port uuid name enc_path enc_host
+  addr="${1:-}"
+  host_hdr=$(state_get "XRAY_WS_HOST")
+  path=$(state_get "XRAY_WS_PATH")
+  port=$(state_get "XRAY_WS_PORT")
+  uuid=$(state_get "XRAY_UUID")
+  [[ -z "$addr" ]] && addr="$host_hdr"
+  # 客户端经 CF：地址=优选IP，端口=443，security=tls，sni/host=域名
+  # 源站直连调试：地址=服务器IP，端口=源站端口，security=none
+  enc_path=$(urlencode "$path")
+  enc_host=$(urlencode "$host_hdr")
+  name=$(urlencode "VLESS-WS-CF")
+  # 默认生成「走 CF 443 TLS」形态（优选 IP 场景）
+  if [[ -n "${2:-}" && "$2" == "direct" ]]; then
+    local h
+    h=$(format_host_for_uri "$addr")
+    name=$(urlencode "VLESS-WS-direct")
+    echo "vless://${uuid}@${h}:${port}?encryption=none&security=none&type=ws&host=${enc_host}&path=${enc_path}#${name}"
+  else
+    local h
+    h=$(format_host_for_uri "$addr")
+    echo "vless://${uuid}@${h}:443?encryption=none&security=tls&type=ws&host=${enc_host}&path=${enc_path}&sni=${enc_host}&fp=chrome#${name}"
+  fi
 }
 
 print_qr() {
@@ -1805,16 +1823,46 @@ show_hy2_link() {
   echo -e "${C_GREEN}====================================${C_RESET}"
 }
 
+show_ws_link() {
+  if [[ "$(state_get XRAY_WS_INSTALLED)" != "1" ]]; then
+    log_warn "VLESS+WS 未安装"
+    return 0
+  fi
+  local host path port uuid link_cf link_direct ip4
+  host=$(state_get "XRAY_WS_HOST")
+  path=$(state_get "XRAY_WS_PATH")
+  port=$(state_get "XRAY_WS_PORT")
+  uuid=$(state_get "XRAY_UUID")
+  ip4=$(get_public_ipv4 2>/dev/null || true)
+  # CF 优选：地址先填域名（用户可改为优选 IP）
+  link_cf=$(build_ws_link "$host")
+  link_direct=$(build_ws_link "${ip4:-$host}" "direct")
+  echo
+  echo -e "${C_BOLD}${C_GREEN}======== VLESS + WebSocket（CF 优选 IP）========${C_RESET}"
+  echo -e "  UUID       : ${uuid}"
+  echo -e "  源站端口   : ${port}  (Xray 本机监听，CF 回源)"
+  echo -e "  Path       : ${path}"
+  echo -e "  Host       : ${host}"
+  echo -e "  传输       : ws"
+  echo
+  echo -e "${C_CYAN}【推荐】经 Cloudflare（客户端地址可改为优选 IP）:${C_RESET}"
+  echo -e "  地址=域名或 CF 优选 IP · 端口=443 · TLS=开启 · SNI/Host=${host}"
+  echo "$link_cf"
+  echo
+  print_qr "$link_cf" "VLESS-WS CF"
+  echo
+  echo -e "${C_DIM}【调试】直连源站（不经 CF）:${C_RESET}"
+  echo "$link_direct"
+  echo -e "${C_GREEN}================================================${C_RESET}"
+}
+
 show_all_links() {
   show_xray_link
+  show_ws_link
   show_hy2_link
   if [[ -f "${OPT_DIR}/README-TG.txt" ]]; then
     echo
-    echo -e "${C_BOLD}Telegram / WARP 提示:${C_RESET}"
-    local socks
-    socks=$(state_get "WARP_SOCKS")
-    [[ -n "$socks" ]] && echo "  WARP Socks5: ${socks}"
-    echo "  详见: ${OPT_DIR}/README-TG.txt"
+    echo -e "${C_DIM}TG 加速资料: ${OPT_DIR}/README-TG.txt${C_RESET}"
   fi
 }
 
@@ -1845,8 +1893,6 @@ service_menu() {
       3)
         svc_exists "$XRAY_SVC" && systemctl status "$XRAY_SVC" --no-pager -l || true
         svc_exists "$HY2_SVC" && systemctl status "$HY2_SVC" --no-pager -l || true
-        systemctl status warp-svc --no-pager -l 2>/dev/null || true
-        echo "tcp_congestion_control=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
         ;;
       4) systemctl restart "$XRAY_SVC" && log_ok "Xray 已重启" || log_err "失败" ;;
       5) systemctl restart "$HY2_SVC" && log_ok "Hy2 已重启" || log_err "失败" ;;
@@ -1865,28 +1911,27 @@ print_banner() {
   cat <<'BANNER'
 ╔══════════════════════════════════════════════════════════╗
 ║         VPS Proxy Manager  ·  Debian 11/12/13            ║
-║   REALITY-Vision  ·  Hysteria2  ·  WARP / TG 加速        ║
+║     REALITY  ·  VLESS+WS(CF)  ·  Hysteria2  ·  TG        ║
 ╚══════════════════════════════════════════════════════════╝
 BANNER
   echo -e "${C_RESET}"
   echo -e "  版本 ${SCRIPT_VERSION}  ·  沙盒 ${SANDBOX_ROOT}"
   echo
-  echo -e "  状态  REALITY : $(status_label xray)"
-  echo -e "  状态  Hy2     : $(status_label hy2)"
-  echo -e "  状态  WARP    : $(status_label warp)"
-  echo -e "  状态  内核调优: $(status_label bbr)"
+  echo -e "  状态  REALITY  : $(status_label xray)"
+  echo -e "  状态  VLESS+WS : $(status_label ws)"
+  echo -e "  状态  Hy2      : $(status_label hy2)"
   echo
   echo -e "${C_BOLD}安装${C_RESET}"
   echo "  [1] 单独安装 REALITY-Vision"
   echo "  [2] 单独安装 Hysteria 2"
-  echo "  [3] 配置 Cloudflare WARP / TG 加速与内核 BBR 调优"
-  echo "  [4] 一键组合安装 (REALITY + Hy2 + TG加速 + 内核调优)"
+  echo "  [3] 单独安装 VLESS+WS（可用 Cloudflare 优选 IP）"
+  echo "  [4] 一键组合安装 (REALITY + VLESS-WS + Hy2)"
   echo
   echo -e "${C_BOLD}卸载${C_RESET}"
   echo "  [5] 单独彻底卸载 REALITY"
   echo "  [6] 单独彻底卸载 Hysteria 2"
-  echo "  [7] 单独彻底卸载 WARP / 网络优化"
-  echo "  [8] 彻底一键清理所有组件与残留"
+  echo "  [7] 单独彻底卸载 VLESS+WS"
+  echo "  [8] 彻底一键清理所有组件与残留（含 TG 加速）"
   echo
   echo -e "${C_BOLD}运维${C_RESET}"
   echo "  [9] 查看节点参数 / 导入链接 / 二维码"
@@ -1904,11 +1949,11 @@ main_loop() {
     case "$choice" in
       1)  install_reality ;;
       2)  install_hysteria2 ;;
-      3)  install_optimize ;;
+      3)  install_vless_ws ;;
       4)  install_all ;;
       5)  uninstall_reality ;;
       6)  uninstall_hysteria2 ;;
-      7)  uninstall_optimize ;;
+      7)  uninstall_vless_ws ;;
       8)  uninstall_all ;;
       9)  show_all_links ;;
       10) service_menu ;;
@@ -1928,7 +1973,6 @@ main_loop() {
 #-------------------------------------------------------------------------------
 #  入口
 #-------------------------------------------------------------------------------
-# 非交互快捷参数（可选）
 usage() {
   cat <<EOF
 用法: sudo $0 [选项]
@@ -1938,17 +1982,19 @@ usage() {
   -v, --version  显示版本
   --status       打印组件状态后退出
 
-沙盒目录: ${SANDBOX_ROOT}
-服务单元: ${XRAY_SVC} / ${HY2_SVC}
-sysctl  : ${SYSCTL_FILE}
+一行安装:
+  curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash
+
+沙盒: ${SANDBOX_ROOT}
+服务: ${XRAY_SVC} / ${HY2_SVC}
 EOF
 }
 
 print_status_once() {
-  echo "REALITY : $(status_label xray | sed 's/\x1b\[[0-9;]*m//g')"
-  echo "Hy2     : $(status_label hy2 | sed 's/\x1b\[[0-9;]*m//g')"
-  echo "WARP    : $(status_label warp | sed 's/\x1b\[[0-9;]*m//g')"
-  echo "BBR     : $(status_label bbr | sed 's/\x1b\[[0-9;]*m//g')"
+  echo "REALITY  : $(status_label xray | sed 's/\x1b\[[0-9;]*m//g')"
+  echo "VLESS+WS : $(status_label ws | sed 's/\x1b\[[0-9;]*m//g')"
+  echo "Hy2      : $(status_label hy2 | sed 's/\x1b\[[0-9;]*m//g')"
+  echo "TG_ACCEL : $(state_get TG_ACCEL)"
 }
 
 main() {
