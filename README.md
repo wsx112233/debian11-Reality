@@ -66,8 +66,27 @@ curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get
 2. CF 橙云，回源到该端口
 3. 客户端：地址=**优选 IP**，端口 **443**，TLS 开，Host/SNI=域名，path 与安装一致
 
+## Hysteria2 抗封锁 / 性能
+
+安装 Hy2 时可选手动确认：
+
+| 选项 | 作用 |
+|------|------|
+| **端口跳跃** | 高位 UDP 段 REDIRECT → 主端口，抗运营商 UDP QoS |
+| **Salamander 混淆** | `obfs` 抗 DPI；客户端需相同密码 |
+
+自动加强：
+
+- 更大 QUIC 收发窗口（按内存分档）
+- UDP 缓冲 / BBR / fq 内核参数
+- HTTPS masquerade 伪装
+- 导入链接自动带上 `mport` 跳跃段与 obfs 参数
+
+云安全组需放行：**主 UDP 端口** + **跳跃端口段**（若启用）。
+
 ---
 
 ## License
 
 MIT
+
