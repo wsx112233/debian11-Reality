@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.4.0"
+readonly SCRIPT_VERSION="1.4.1"
 readonly SANDBOX_ROOT="/etc/vps_proxy_mgr"
 readonly BIN_DIR="/usr/local/bin"
 readonly XRAY_BIN="${BIN_DIR}/vps_xray"
@@ -1903,6 +1903,117 @@ service_menu() {
 }
 
 #-------------------------------------------------------------------------------
+#  多选解析：支持 "1" / "1 3" / "1,3" / "1, 2 3" / "a" / "all" / "123"
+#-------------------------------------------------------------------------------
+# 输出去重后的编号列表（空格分隔），无效输入返回非 0
+parse_multi_choice() {
+  local raw="$1"
+  local allow="$2"   # 允许的数字字符集合，如 "123"
+  local out=() seen="|" token ch buf=""
+  raw=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[[:space:]]//g')
+  [[ -z "$raw" ]] && return 1
+  if [[ "$raw" == "a" || "$raw" == "all" || "$raw" == "*" ]]; then
+    # 展开 allow 中每一位
+    local i
+    for (( i=0; i<${#allow}; i++ )); do
+      out+=("${allow:i:1}")
+    done
+    printf '%s\n' "${out[*]}"
+    return 0
+  fi
+  # 去掉逗号，剩余应为数字
+  raw="${raw//,/}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  local i d
+  for (( i=0; i<${#raw}; i++ )); do
+    d="${raw:i:1}"
+    if [[ "$allow" != *"$d"* ]]; then
+      return 1
+    fi
+    if [[ "$seen" != *"|${d}|"* ]]; then
+      out+=("$d")
+      seen+="${d}|"
+    fi
+  done
+  [[ ${#out[@]} -eq 0 ]] && return 1
+  printf '%s\n' "${out[*]}"
+}
+
+# 安装子菜单：单选或多选协议
+menu_install() {
+  echo
+  echo -e "${C_BOLD}--- 安装（单选 / 多选）---${C_RESET}"
+  echo "  [1] REALITY-Vision"
+  echo "  [2] Hysteria 2"
+  echo "  [3] VLESS+WS（CF 优选 IP）"
+  echo
+  echo -e "  ${C_DIM}单选示例: 1    多选示例: 1 3  或  1,3  或  13${C_RESET}"
+  echo -e "  ${C_DIM}全部安装: a  或  all    返回: 0${C_RESET}"
+  local raw picks p t0
+  raw=$(ask "请选择要安装的协议" "")
+  [[ -z "$raw" || "$raw" == "0" ]] && { log_info "已取消"; return 0; }
+  if ! picks=$(parse_multi_choice "$raw" "123"); then
+    log_warn "无效选择: ${raw}（仅 1/2/3，可多选）"
+    return 0
+  fi
+  t0=$(date +%s)
+  log_step "开始安装: ${picks}"
+  for p in $picks; do
+    echo
+    case "$p" in
+      1) install_reality ;;
+      2) install_hysteria2 ;;
+      3) install_vless_ws ;;
+    esac
+  done
+  echo
+  log_ok "所选协议处理完成（耗时 $(( $(date +%s) - t0 ))s）"
+  show_all_links
+}
+
+# 卸载子菜单：单选或多选协议；a=全部清理
+menu_uninstall() {
+  echo
+  echo -e "${C_BOLD}--- 卸载（单选 / 多选）---${C_RESET}"
+  echo "  [1] REALITY-Vision     状态: $(status_label xray)"
+  echo "  [2] Hysteria 2         状态: $(status_label hy2)"
+  echo "  [3] VLESS+WS           状态: $(status_label ws)"
+  echo
+  echo -e "  ${C_DIM}单选示例: 2    多选示例: 1 3  或  1,2${C_RESET}"
+  echo -e "  ${C_DIM}全部卸载(含 TG 加速残留): a  或  all    返回: 0${C_RESET}"
+  local raw picks p
+  raw=$(ask "请选择要卸载的协议" "")
+  [[ -z "$raw" || "$raw" == "0" ]] && { log_info "已取消"; return 0; }
+  # all → 走彻底全清（含 TG）
+  local raw_l
+  raw_l=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[[:space:]]//g')
+  if [[ "$raw_l" == "a" || "$raw_l" == "all" || "$raw_l" == "*" ]]; then
+    uninstall_all
+    return 0
+  fi
+  if ! picks=$(parse_multi_choice "$raw" "123"); then
+    log_warn "无效选择: ${raw}（仅 1/2/3，可多选）"
+    return 0
+  fi
+  if ! confirm "确认卸载所选: ${picks} ？"; then
+    log_info "已取消"
+    return 0
+  fi
+  log_step "开始卸载: ${picks}"
+  for p in $picks; do
+    echo
+    case "$p" in
+      1) uninstall_reality || true ;;
+      2) uninstall_hysteria2 || true ;;
+      3) uninstall_vless_ws || true ;;
+    esac
+  done
+  log_ok "所选协议卸载完成"
+}
+
+#-------------------------------------------------------------------------------
 #  主菜单
 #-------------------------------------------------------------------------------
 print_banner() {
@@ -1921,22 +2032,14 @@ BANNER
   echo -e "  状态  VLESS+WS : $(status_label ws)"
   echo -e "  状态  Hy2      : $(status_label hy2)"
   echo
-  echo -e "${C_BOLD}安装${C_RESET}"
-  echo "  [1] 单独安装 REALITY-Vision"
-  echo "  [2] 单独安装 Hysteria 2"
-  echo "  [3] 单独安装 VLESS+WS（可用 Cloudflare 优选 IP）"
-  echo "  [4] 一键组合安装 (REALITY + VLESS-WS + Hy2)"
-  echo
-  echo -e "${C_BOLD}卸载${C_RESET}"
-  echo "  [5] 单独彻底卸载 REALITY"
-  echo "  [6] 单独彻底卸载 Hysteria 2"
-  echo "  [7] 单独彻底卸载 VLESS+WS"
-  echo "  [8] 彻底一键清理所有组件与残留（含 TG 加速）"
-  echo
-  echo -e "${C_BOLD}运维${C_RESET}"
-  echo "  [9] 查看节点参数 / 导入链接 / 二维码"
-  echo "  [10] 重启 / 停止 / 查看服务状态"
+  echo -e "${C_BOLD}功能${C_RESET}"
+  echo "  [1] 安装协议   （支持单选 / 多选）"
+  echo "  [2] 卸载协议   （支持单选 / 多选 / 全清）"
+  echo "  [3] 查看节点参数 / 导入链接 / 二维码"
+  echo "  [4] 重启 / 停止 / 查看服务状态"
   echo "  [0] 退出"
+  echo
+  echo -e "  ${C_DIM}安装多选示例: 进入[1]后输入 1 3 或 13${C_RESET}"
   echo
 }
 
@@ -1947,16 +2050,10 @@ main_loop() {
     choice=$(ask "请输入选项" "")
     echo
     case "$choice" in
-      1)  install_reality ;;
-      2)  install_hysteria2 ;;
-      3)  install_vless_ws ;;
-      4)  install_all ;;
-      5)  uninstall_reality ;;
-      6)  uninstall_hysteria2 ;;
-      7)  uninstall_vless_ws ;;
-      8)  uninstall_all ;;
-      9)  show_all_links ;;
-      10) service_menu ;;
+      1)  menu_install ;;
+      2)  menu_uninstall ;;
+      3)  show_all_links ;;
+      4)  service_menu ;;
       0|q|Q)
         log_info "再见"
         exit 0
