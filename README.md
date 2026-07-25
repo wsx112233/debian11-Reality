@@ -1,92 +1,46 @@
 # Debian 11/12/13 · VPS Proxy Manager
 
 [![Debian](https://img.shields.io/badge/Debian-11%20%7C%2012%20%7C%2013-A81D33?logo=debian&logoColor=white)](https://www.debian.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-单文件交互脚本：在 **Debian 11 / 12 / 13**（`x86_64` / `arm64`）上安装、管理与干净卸载代理节点。
+单文件脚本：安装 / 管理 / 干净卸载 **REALITY** · **Hysteria2** · **VLESS+WS（Cloudflare）**。
 
-| 协议 | 说明 |
-|------|------|
-| **REALITY-Vision** | `VLESS + TCP + REALITY + Vision` |
-| **VLESS + WebSocket** | 可走 **Cloudflare 优选 IP**（橙云回源） |
-| **Hysteria 2** | QUIC 抗丢包 |
-
-- **随机高位端口**（20000–60000）与 **随机 WebSocket 路径**（回车采用，可手改）
-- **TG 加速**随协议静默启用；全部卸载后清干净
-- 沙盒：`/etc/vps_proxy_mgr/` · `/usr/local/bin/vps_*`
-- 节点链接：**有公网 IPv6 则优先 IPv6**
-
----
-
-## 快速开始
+## 一行安装
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash
 ```
 
----
-
-## 主菜单
+## 主菜单（v1.7）
 
 ```text
-[1] 安装协议     可多选，端口/路径自动随机
-[2] 卸载协议     只显示已安装项
-[3] 节点与链接   参数 / 导入 URI / 二维码
-[4] 服务管理     重启 / 停止 / 状态
+[1] 安装     多选协议 · 智能端口
+[2] 卸载     仅已安装项
+[3] 节点     链接 / 二维码 / 导出文件
+[4] 服务     启停 / 日志 / 诊断
+[5] 诊断     一键检查源站与 CF 端口
 [0] 退出
 ```
 
-### 安装 [1]
+## 协议要点
 
-| 输入 | 含义 |
-|------|------|
-| `1` | REALITY |
-| `2` | Hysteria2 |
-| `3` | VLESS+WS |
-| `1 3` / `13` | 多选 |
-| `a` | 全装 |
-| `0` | 返回 |
+| 协议 | 端口策略 | 是否走 CF |
+|------|----------|-----------|
+| REALITY | 随机高位 TCP | 否（直连） |
+| Hysteria2 | 随机高位 UDP + 可选跳跃/混淆 | 否（直连） |
+| VLESS+WS | **仅 CF 允许端口**（HTTP 8080… / HTTPS 8443…） | 是（橙云） |
 
-每个协议安装时：
+- Hy2 分享链接：`主端口 + mport=段`（勿写成 `ip:start-end`）
+- WS 客户端：**无 flow**；CF 源站须在官方端口列表内
+- 节点自动导出：`/etc/vps_proxy_mgr/share/client-links.txt`
 
-- **端口**：自动生成空闲高位端口，直接回车即可
-- **VLESS+WS path**：随机伪装路径（如 `/api/v2/xxxx`），回车采用
+## 非交互
 
-### 卸载 [2]
-
-- **只列出已安装协议**（未安装的不会出现）
-- 可多选；`a` = 卸当前全部；卸完自动清 TG 加速
-- 若一个都没装：提示无需卸载
-
----
-
-## VLESS+WS + CF 优选
-
-1. 脚本在源站监听**随机高位端口** + **随机 path**（无源站 TLS）
-2. CF 橙云，回源到该端口
-3. 客户端：地址=**优选 IP**，端口 **443**，TLS 开，Host/SNI=域名，path 与安装一致
-
-## Hysteria2 抗封锁 / 性能
-
-安装 Hy2 时可选手动确认：
-
-| 选项 | 作用 |
-|------|------|
-| **端口跳跃** | 高位 UDP 段 REDIRECT → 主端口，抗运营商 UDP QoS |
-| **Salamander 混淆** | `obfs` 抗 DPI；客户端需相同密码 |
-
-自动加强：
-
-- 更大 QUIC 收发窗口（按内存分档）
-- UDP 缓冲 / BBR / fq 内核参数
-- HTTPS masquerade 伪装
-- 导入链接自动带上 `mport` 跳跃段与 obfs 参数
-
-云安全组需放行：**主 UDP 端口** + **跳跃端口段**（若启用）。
-
----
+```bash
+sudo bash proxy_manager.sh --status
+sudo bash proxy_manager.sh --diagnose
+sudo bash proxy_manager.sh --links
+```
 
 ## License
 
 MIT
-

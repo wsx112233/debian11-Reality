@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.6.5"
-# Cloudflare 橙云「默认支持」的回源端口（任意高位如 44303 橙云不转发）
-# 文档: https://developers.cloudflare.com/fundamentals/reference/network-ports/
-# HTTP 回源（SSL 模式 Flexible：源站无 TLS）
+readonly SCRIPT_VERSION="1.7.0"
+# Cloudflare 橙云默认回源端口
+# https://developers.cloudflare.com/fundamentals/reference/network-ports/
 readonly CF_HTTP_ORIGIN_PORTS=(80 8080 8880 2052 2082 2086 2095)
-# HTTPS 回源（SSL 模式 Full：源站需 TLS，可用自签）
 readonly CF_HTTPS_ORIGIN_PORTS=(443 2053 2083 2087 2096 8443)
 readonly SANDBOX_ROOT="/etc/vps_proxy_mgr"
 readonly BIN_DIR="/usr/local/bin"
@@ -16,9 +14,10 @@ readonly HY2_DIR="${SANDBOX_ROOT}/hysteria2"
 readonly OPT_DIR="${SANDBOX_ROOT}/optimize"
 readonly LOG_DIR="${SANDBOX_ROOT}/logs"
 readonly CACHE_DIR="${SANDBOX_ROOT}/cache"
+readonly SHARE_DIR="${SANDBOX_ROOT}/share"
 readonly STATE_FILE="${SANDBOX_ROOT}/state.env"
-# 旧版 WARP 残留清理用（不再安装）
 readonly WARP_DIR="${SANDBOX_ROOT}/warp"
+readonly SHARE_LINKS="${SHARE_DIR}/client-links.txt"
 
 # 安装速度相关：缓存 TTL（秒）
 readonly IP_CACHE_TTL=600
@@ -85,7 +84,6 @@ readonly C_BOLD='\033[1m'
 readonly C_DIM='\033[2m'
 readonly C_BG='\033[48;5;236m'
 
-# 高位端口范围（避开常见系统服务）
 readonly PORT_HIGH_MIN=20000
 readonly PORT_HIGH_MAX=60000
 
@@ -97,6 +95,7 @@ log_ok()    { echo -e "  ${C_GREEN}✔${C_RESET} $*"; }
 log_warn()  { echo -e "  ${C_YELLOW}!${C_RESET} $*"; }
 log_err()   { echo -e "  ${C_RED}✘${C_RESET} $*" >&2; }
 log_step()  { echo -e "\n  ${C_MAGENTA}▸${C_RESET} ${C_BOLD}$*${C_RESET}"; }
+log_tip()   { echo -e "  ${C_DIM}💡 $*${C_RESET}"; }
 
 die() {
   log_err "$*"
@@ -104,29 +103,69 @@ die() {
 }
 
 hr() {
-  echo -e "  ${C_DIM}────────────────────────────────────────────${C_RESET}"
-}
-
-ui_box_top() {
-  echo -e "${C_CYAN}  ╭──────────────────────────────────────────────╮${C_RESET}"
-}
-ui_box_mid() {
-  # $1 = 内容（已含颜色亦可）
-  printf "${C_CYAN}  │${C_RESET} %-44s ${C_CYAN}│${C_RESET}\n" "$1"
-}
-ui_box_bot() {
-  echo -e "${C_CYAN}  ╰──────────────────────────────────────────────╯${C_RESET}"
+  echo -e "  ${C_DIM}────────────────────────────────────────────────${C_RESET}"
 }
 
 ui_section() {
   echo
-  echo -e "  ${C_WHITE}${C_BOLD}$1${C_RESET}"
+  echo -e "  ${C_CYAN}▸${C_RESET} ${C_WHITE}${C_BOLD}$1${C_RESET}"
   hr
 }
 
+# 紧凑状态徽章（纯文本，兼容无 Unicode 终端）
+badge_run()  { echo -e "${C_GREEN}● 运行${C_RESET}"; }
+badge_stop() { echo -e "${C_YELLOW}○ 停止${C_RESET}"; }
+badge_off()  { echo -e "${C_DIM}· 未装${C_RESET}"; }
+
 pause_return() {
   echo
-  _tty_read "$(echo -e "  ${C_DIM}按 Enter 返回…${C_RESET}")" >/dev/null || true
+  _tty_read "$(echo -e "  ${C_DIM}按 Enter 返回主菜单…${C_RESET}")" >/dev/null || true
+}
+
+# 安装前轻量预检
+preflight() {
+  local ok=1
+  command -v curl &>/dev/null || { log_warn "缺少 curl"; ok=0; }
+  command -v systemctl &>/dev/null || { log_err "需要 systemd"; return 1; }
+  local free_kb
+  free_kb=$(df -Pk /usr/local 2>/dev/null | awk 'NR==2{print $4}' || echo 999999)
+  if [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb < 102400 )); then
+    log_warn "磁盘空间偏低（/usr/local 可用 <100MB）"
+  fi
+  # 预热公网 IP 缓存（后台，不阻塞）
+  ( get_public_ipv4 &>/dev/null || true ) &
+  ( get_public_ipv6 &>/dev/null || true ) &
+  return 0
+}
+
+# 将链接追加写入分享文件（方便 scp/cat）
+share_write_header() {
+  mkdir -p "$SHARE_DIR"
+  {
+    echo "# VPS Proxy Manager v${SCRIPT_VERSION} · $(date '+%F %T %z')"
+    echo "# 文件: ${SHARE_LINKS}"
+    echo "# 用法: cat ${SHARE_LINKS}"
+    echo
+  } > "$SHARE_LINKS"
+  chmod 600 "$SHARE_LINKS"
+}
+
+share_append_link() {
+  local title="$1" link="$2"
+  mkdir -p "$SHARE_DIR"
+  [[ -f "$SHARE_LINKS" ]] || share_write_header
+  {
+    echo "## ${title}"
+    echo "${link}"
+    echo
+  } >> "$SHARE_LINKS"
+}
+
+share_flush_notice() {
+  if [[ -f "$SHARE_LINKS" ]]; then
+    log_ok "节点链接已保存"
+    log_tip "查看: cat ${SHARE_LINKS}"
+  fi
 }
 
 # 从终端读入（兼容 curl|bash / bash <(curl) 管道场景）
@@ -582,7 +621,7 @@ check_debian() {
 }
 
 ensure_sandbox() {
-  mkdir -p "$SANDBOX_ROOT" "$XRAY_DIR" "$HY2_DIR" "$OPT_DIR" "$LOG_DIR" "$CACHE_DIR"
+  mkdir -p "$SANDBOX_ROOT" "$XRAY_DIR" "$HY2_DIR" "$OPT_DIR" "$LOG_DIR" "$CACHE_DIR" "$SHARE_DIR"
   chmod 700 "$SANDBOX_ROOT"
   touch "$STATE_FILE"
   chmod 600 "$STATE_FILE"
@@ -705,35 +744,41 @@ status_label() {
   case "$name" in
     xray)
       if [[ "$(state_get XRAY_INSTALLED)" == "1" ]] && [[ -x "$XRAY_BIN" ]] && svc_exists "$XRAY_SVC"; then
-        if svc_active "$XRAY_SVC"; then
-          echo -e "${C_GREEN}运行中${C_RESET}"
-        else
-          echo -e "${C_YELLOW}已停止${C_RESET}"
-        fi
+        if svc_active "$XRAY_SVC"; then badge_run; else badge_stop; fi
       else
-        echo -e "${C_DIM}未安装${C_RESET}"
+        badge_off
       fi
       ;;
     ws)
       if [[ "$(state_get XRAY_WS_INSTALLED)" == "1" ]] && [[ -x "$XRAY_BIN" ]] && svc_exists "$XRAY_SVC"; then
-        if svc_active "$XRAY_SVC"; then
-          echo -e "${C_GREEN}运行中${C_RESET}"
-        else
-          echo -e "${C_YELLOW}已停止${C_RESET}"
-        fi
+        if svc_active "$XRAY_SVC"; then badge_run; else badge_stop; fi
       else
-        echo -e "${C_DIM}未安装${C_RESET}"
+        badge_off
       fi
       ;;
     hy2)
-      if [[ -x "$HY2_BIN" ]] && svc_exists "$HY2_SVC"; then
-        if svc_active "$HY2_SVC"; then
-          echo -e "${C_GREEN}运行中${C_RESET}"
-        else
-          echo -e "${C_YELLOW}已停止${C_RESET}"
-        fi
+      if [[ "$(state_get HY2_INSTALLED)" == "1" ]] && [[ -x "$HY2_BIN" ]] && svc_exists "$HY2_SVC"; then
+        if svc_active "$HY2_SVC"; then badge_run; else badge_stop; fi
       else
-        echo -e "${C_DIM}未安装${C_RESET}"
+        badge_off
+      fi
+      ;;
+  esac
+}
+
+# 状态行附加端口信息（主菜单用）
+status_extra() {
+  local name="$1"
+  case "$name" in
+    xray) [[ "$(state_get XRAY_INSTALLED)" == "1" ]] && echo " :$(state_get XRAY_PORT)" || true ;;
+    ws)   [[ "$(state_get XRAY_WS_INSTALLED)" == "1" ]] && echo " :$(state_get XRAY_WS_PORT)$(state_get XRAY_WS_PATH)" || true ;;
+    hy2)
+      if [[ "$(state_get HY2_INSTALLED)" == "1" ]]; then
+        if [[ "$(state_get HY2_HOP)" == "1" ]]; then
+          echo " :$(state_get HY2_PORT) hop"
+        else
+          echo " :$(state_get HY2_PORT)/udp"
+        fi
       fi
       ;;
   esac
@@ -2389,11 +2434,13 @@ show_xray_link() {
   echo -e "  ${C_CYAN}导入链接${C_RESET}"
   echo "  $link_primary"
   echo
+  share_append_link "REALITY" "$link_primary"
   print_qr "$link_primary" "REALITY"
   if is_ipv6 "$ip6" && is_ipv4 "$ip4"; then
     link_v4=$(build_vless_link "$ip4")
     echo -e "  ${C_DIM}IPv4 备用:${C_RESET}"
     echo "  $link_v4"
+    share_append_link "REALITY-IPv4" "$link_v4"
   fi
 }
 
@@ -2432,15 +2479,16 @@ show_hy2_link() {
   echo -e "  ${C_CYAN}导入链接（可直接粘贴）${C_RESET}"
   echo "  $link_primary"
   echo
-  # 再给一行无 # 备注的纯链接，部分客户端对 fragment 敏感
   echo -e "  ${C_DIM}无备注版:${C_RESET}"
   echo "  ${link_primary%%#*}"
   echo
+  share_append_link "Hysteria2" "${link_primary%%#*}"
   print_qr "${link_primary%%#*}" "Hy2"
   if is_ipv6 "$ip6" && is_ipv4 "$ip4"; then
     link_v4=$(build_hy2_link "$ip4")
     echo -e "  ${C_DIM}IPv4 备用:${C_RESET}"
     echo "  $link_v4"
+    share_append_link "Hysteria2-IPv4" "${link_v4%%#*}"
   fi
 }
 
@@ -2472,9 +2520,11 @@ show_ws_link() {
   echo -e "  ${C_CYAN}经 CF（地址可改为优选 IP）${C_RESET}"
   echo "  $link_cf"
   echo
+  share_append_link "VLESS-WS-CF" "$link_cf"
   print_qr "$link_cf" "VLESS-WS"
   echo -e "  ${C_DIM}直连源站调试:${C_RESET}"
   echo "  $link_direct"
+  share_append_link "VLESS-WS-direct" "$link_direct"
 }
 
 show_all_links() {
@@ -2485,12 +2535,86 @@ show_all_links() {
   if [[ $any -eq 0 ]]; then
     ui_section "节点信息"
     log_warn "尚未安装任何协议"
-    log_info "主菜单选 [1] 安装"
+    log_tip "主菜单选 [1] 安装"
     return 0
   fi
+  share_write_header
   show_xray_link
   show_ws_link
   show_hy2_link
+  share_flush_notice
+}
+
+# 一键诊断：本机监听 / 服务 / 常见 CF 坑提示
+run_diagnose() {
+  ui_section "连通诊断"
+  echo -e "  ${C_DIM}时间 $(date '+%F %T') · 主机 $(hostname -f 2>/dev/null || hostname)${C_RESET}"
+  hr
+  # 服务
+  if svc_exists "$XRAY_SVC"; then
+    if svc_active "$XRAY_SVC"; then log_ok "xray-custom 运行中"; else log_warn "xray-custom 已安装但未运行"; fi
+  else
+    log_info "xray-custom 未安装"
+  fi
+  if svc_exists "$HY2_SVC"; then
+    if svc_active "$HY2_SVC"; then log_ok "hy2-custom 运行中"; else log_warn "hy2-custom 已安装但未运行"; fi
+  else
+    log_info "hy2-custom 未安装"
+  fi
+  hr
+  # 监听
+  log_info "监听端口:"
+  if command -v ss &>/dev/null; then
+    ss -lntup 2>/dev/null | grep -E 'vps_xray|vps_hysteria' | sed 's/^/    /' || echo "    (无)"
+  fi
+  hr
+  # 协议摘要
+  if is_reality_installed; then
+    log_ok "REALITY  :$(state_get XRAY_PORT)  sni=$(state_get XRAY_SNI)"
+  fi
+  if is_ws_installed; then
+    local wp wm
+    wp=$(state_get XRAY_WS_PORT)
+    wm=$(state_get XRAY_WS_CF_MODE); [[ -z "$wm" ]] && wm="http"
+    log_ok "VLESS-WS :${wp}$(state_get XRAY_WS_PATH)  mode=${wm}"
+    local cf_ok=0 x
+    if [[ "$wm" == "https" ]]; then
+      for x in "${CF_HTTPS_ORIGIN_PORTS[@]}"; do [[ "$wp" == "$x" ]] && cf_ok=1; done
+    else
+      for x in "${CF_HTTP_ORIGIN_PORTS[@]}"; do [[ "$wp" == "$x" ]] && cf_ok=1; done
+    fi
+    if [[ $cf_ok -eq 1 ]]; then
+      log_ok "WS 源站端口在 CF 允许列表内"
+    else
+      log_err "WS 源站端口 ${wp} 不在 CF 允许列表 → 橙云必失败"
+      log_tip "HTTP 用 8080 等 · HTTPS 用 8443 等；勿用 44303 这类高位"
+    fi
+    # 本机 101 探测
+    if command -v curl &>/dev/null && [[ -n "$wp" ]]; then
+      local code
+      code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 \
+        -H "Connection: Upgrade" -H "Upgrade: websocket" \
+        -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+        -H "Host: $(state_get XRAY_WS_HOST)" \
+        "http://127.0.0.1:${wp}$(state_get XRAY_WS_PATH)" 2>/dev/null || echo "000")
+      if [[ "$code" == "101" ]]; then
+        log_ok "本机 WS 握手 101 OK（源站正常）"
+      else
+        log_warn "本机 WS 探测 HTTP ${code}（期望 101）"
+      fi
+    fi
+  fi
+  if is_hy2_installed; then
+    log_ok "Hy2      :$(state_get HY2_PORT)/udp  hop=$(state_get HY2_HOP)"
+    [[ "$(state_get HY2_HOP)" == "1" ]] && \
+      log_tip "Hy2 链接须: 主端口 + mport=段 ，勿写成 ip:start-end"
+  fi
+  hr
+  log_info "公网 IP: $(get_public_ip)"
+  log_tip "安全组须放行各协议端口；VLESS-WS 还须 CF 橙云 + Flexible/Full"
+  if [[ -f "$SHARE_LINKS" ]]; then
+    log_tip "已保存链接: cat ${SHARE_LINKS}"
+  fi
 }
 
 #-------------------------------------------------------------------------------
@@ -2499,11 +2623,13 @@ show_all_links() {
 service_menu() {
   while true; do
     ui_section "服务管理"
-    echo -e "  ${C_WHITE}[1]${C_RESET}  重启全部"
+    echo -e "  ${C_WHITE}[1]${C_RESET}  重启全部已装服务"
     echo -e "  ${C_WHITE}[2]${C_RESET}  停止全部"
-    echo -e "  ${C_WHITE}[3]${C_RESET}  查看状态"
+    echo -e "  ${C_WHITE}[3]${C_RESET}  systemctl 状态"
     echo -e "  ${C_WHITE}[4]${C_RESET}  仅重启 Xray"
     echo -e "  ${C_WHITE}[5]${C_RESET}  仅重启 Hysteria2"
+    echo -e "  ${C_WHITE}[6]${C_RESET}  连通诊断（推荐排错）"
+    echo -e "  ${C_WHITE}[7]${C_RESET}  查看最近错误日志"
     echo -e "  ${C_WHITE}[0]${C_RESET}  返回"
     echo
     local c
@@ -2523,8 +2649,14 @@ service_menu() {
         ;;
       4) systemctl restart "$XRAY_SVC" && log_ok "Xray 已重启" || log_err "失败" ;;
       5) systemctl restart "$HY2_SVC" && log_ok "Hy2 已重启" || log_err "失败" ;;
+      6) run_diagnose ;;
+      7)
+        echo
+        [[ -f "${LOG_DIR}/xray-error.log" ]] && { log_info "xray-error (尾部):"; tail -n 30 "${LOG_DIR}/xray-error.log" 2>/dev/null | sed 's/^/    /' || true; }
+        journalctl -u "$XRAY_SVC" -u "$HY2_SVC" -n 40 --no-pager 2>/dev/null | sed 's/^/    /' || true
+        ;;
       0) return 0 ;;
-      *) log_warn "请输入 0–5" ;;
+      *) log_warn "请输入 0–7" ;;
     esac
     echo
   done
@@ -2571,11 +2703,12 @@ parse_multi_choice() {
 menu_install() {
   local raw picks p t0 names=""
   ui_section "安装协议"
-  echo -e "  ${C_WHITE}[1]${C_RESET}  REALITY-Vision       $(status_label xray)"
-  echo -e "  ${C_WHITE}[2]${C_RESET}  Hysteria 2           $(status_label hy2)"
-  echo -e "  ${C_WHITE}[3]${C_RESET}  VLESS+WS (CF优选)    $(status_label ws)"
+  printf "  ${C_WHITE}[1]${C_RESET}  %-22s %b%s\n" "REALITY-Vision" "$(status_label xray)" "$(status_extra xray)"
+  printf "  ${C_WHITE}[2]${C_RESET}  %-22s %b%s\n" "Hysteria 2" "$(status_label hy2)" "$(status_extra hy2)"
+  printf "  ${C_WHITE}[3]${C_RESET}  %-22s %b%s\n" "VLESS+WS (CF)" "$(status_label ws)" "$(status_extra ws)"
   hr
-  echo -e "  ${C_DIM}多选示例 ${C_CYAN}1 3${C_DIM}  ·  ${C_CYAN}13${C_DIM}  ·  全选 ${C_CYAN}a${C_DIM}  ·  返回 ${C_CYAN}0${C_RESET}"
+  echo -e "  ${C_DIM}多选 ${C_CYAN}1 3${C_DIM} / ${C_CYAN}13${C_DIM} · 全选 ${C_CYAN}a${C_DIM} · 返回 ${C_CYAN}0${C_RESET}"
+  log_tip "REALITY/Hy2=随机高位端口 · WS=仅 CF 允许端口(8080/8443…)"
   echo
   raw=$(ask "要安装哪些" "")
   [[ -z "$raw" || "$raw" == "0" ]] && { log_info "已取消"; return 0; }
@@ -2591,7 +2724,7 @@ menu_install() {
     esac
   done
   log_ok "计划安装: ${C_BOLD}${names}${C_RESET}"
-  log_info "端口与路径将自动随机生成（可回车确认或手改）"
+  share_write_header
   t0=$(date +%s)
   for p in $picks; do
     case "$p" in
@@ -2602,6 +2735,8 @@ menu_install() {
   done
   echo
   log_ok "全部完成 · ${C_DIM}$(( $(date +%s) - t0 ))s${C_RESET}"
+  share_flush_notice
+  run_diagnose
 }
 
 #---------- 卸载：只列出【已安装】的协议，再多选 ----------
@@ -2664,22 +2799,25 @@ menu_uninstall() {
 #-------------------------------------------------------------------------------
 print_banner() {
   clear 2>/dev/null || true
+  local ip_show
+  ip_show=$(cache_get "public_ipv4" "$IP_CACHE_TTL" 2>/dev/null || cache_get "public_ipv6" "$IP_CACHE_TTL" 2>/dev/null || echo "…")
   echo
-  echo -e "${C_CYAN}${C_BOLD}  ┌─────────────────────────────────────────────┐${C_RESET}"
-  echo -e "${C_CYAN}${C_BOLD}  │${C_RESET}  ${C_WHITE}VPS Proxy Manager${C_RESET}  ${C_DIM}v${SCRIPT_VERSION}${C_RESET}              ${C_CYAN}${C_BOLD}│${C_RESET}"
-  echo -e "${C_CYAN}${C_BOLD}  │${C_RESET}  ${C_DIM}Debian 11/12/13 · 随机高位端口${C_RESET}          ${C_CYAN}${C_BOLD}│${C_RESET}"
-  echo -e "${C_CYAN}${C_BOLD}  └─────────────────────────────────────────────┘${C_RESET}"
+  echo -e "  ${C_CYAN}╔════════════════════════════════════════════════╗${C_RESET}"
+  echo -e "  ${C_CYAN}║${C_RESET}  ${C_WHITE}${C_BOLD}VPS Proxy Manager${C_RESET}  ${C_DIM}v${SCRIPT_VERSION}${C_RESET}                 ${C_CYAN}║${C_RESET}"
+  echo -e "  ${C_CYAN}║${C_RESET}  ${C_DIM}Debian 11/12/13 · REALITY · Hy2 · WS/CF${C_RESET}     ${C_CYAN}║${C_RESET}"
+  echo -e "  ${C_CYAN}╚════════════════════════════════════════════════╝${C_RESET}"
   echo
-  echo -e "  ${C_DIM}协议状态${C_RESET}"
-  printf "  %-12s %b\n" "REALITY"  "$(status_label xray)"
-  printf "  %-12s %b\n" "VLESS+WS" "$(status_label ws)"
-  printf "  %-12s %b\n" "Hysteria2" "$(status_label hy2)"
-  echo
+  echo -e "  ${C_DIM}公网${C_RESET} ${ip_show}"
   hr
-  echo -e "  ${C_WHITE}${C_BOLD}[1]${C_RESET}  安装协议     ${C_DIM}可多选，端口/路径自动随机${C_RESET}"
-  echo -e "  ${C_WHITE}${C_BOLD}[2]${C_RESET}  卸载协议     ${C_DIM}只显示已安装项${C_RESET}"
-  echo -e "  ${C_WHITE}${C_BOLD}[3]${C_RESET}  节点与链接   ${C_DIM}参数 / 导入 URI / 二维码${C_RESET}"
-  echo -e "  ${C_WHITE}${C_BOLD}[4]${C_RESET}  服务管理     ${C_DIM}重启 / 停止 / 状态${C_RESET}"
+  printf "  %-11s %b%s\n" "REALITY"  "$(status_label xray)" "$(status_extra xray)"
+  printf "  %-11s %b%s\n" "VLESS+WS" "$(status_label ws)" "$(status_extra ws)"
+  printf "  %-11s %b%s\n" "Hysteria2" "$(status_label hy2)" "$(status_extra hy2)"
+  hr
+  echo -e "  ${C_WHITE}${C_BOLD}[1]${C_RESET}  安装     ${C_DIM}多选协议 · 智能端口${C_RESET}"
+  echo -e "  ${C_WHITE}${C_BOLD}[2]${C_RESET}  卸载     ${C_DIM}仅已安装项${C_RESET}"
+  echo -e "  ${C_WHITE}${C_BOLD}[3]${C_RESET}  节点     ${C_DIM}链接 / 二维码 / 导出文件${C_RESET}"
+  echo -e "  ${C_WHITE}${C_BOLD}[4]${C_RESET}  服务     ${C_DIM}启停 / 日志 / 诊断${C_RESET}"
+  echo -e "  ${C_WHITE}${C_BOLD}[5]${C_RESET}  诊断     ${C_DIM}一键检查源站与 CF 端口${C_RESET}"
   echo -e "  ${C_WHITE}${C_BOLD}[0]${C_RESET}  退出"
   echo
 }
@@ -2695,13 +2833,14 @@ main_loop() {
       2)  menu_uninstall ;;
       3)  show_all_links ;;
       4)  service_menu ;;
+      5)  run_diagnose ;;
       0|q|Q)
         echo
         log_info "再见"
         exit 0
         ;;
       *)
-        log_warn "请输入 0–4"
+        log_warn "请输入 0–5"
         ;;
     esac
     pause_return
@@ -2715,24 +2854,27 @@ usage() {
   cat <<EOF
 用法: sudo $0 [选项]
 
-  无参数          进入彩色交互菜单
-  -h, --help     显示帮助
-  -v, --version  显示版本
-  --status       打印组件状态后退出
+  (无参数)     交互菜单
+  -h, --help  帮助
+  -v          版本
+  --status    组件状态
+  --diagnose  连通诊断后退出
+  --links     打印并导出节点链接后退出
 
 一行安装:
   curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash
 
-沙盒: ${SANDBOX_ROOT}
-服务: ${XRAY_SVC} / ${HY2_SVC}
+沙盒 ${SANDBOX_ROOT}
+分享 ${SHARE_LINKS}
 EOF
 }
 
 print_status_once() {
-  echo "REALITY  : $(status_label xray | sed 's/\x1b\[[0-9;]*m//g')"
-  echo "VLESS+WS : $(status_label ws | sed 's/\x1b\[[0-9;]*m//g')"
-  echo "Hy2      : $(status_label hy2 | sed 's/\x1b\[[0-9;]*m//g')"
+  echo "REALITY  : $(status_label xray | sed 's/\x1b\[[0-9;]*m//g')$(status_extra xray)"
+  echo "VLESS+WS : $(status_label ws | sed 's/\x1b\[[0-9;]*m//g')$(status_extra ws)"
+  echo "Hy2      : $(status_label hy2 | sed 's/\x1b\[[0-9;]*m//g')$(status_extra hy2)"
   echo "TG_ACCEL : $(state_get TG_ACCEL)"
+  echo "SHARE    : ${SHARE_LINKS}"
 }
 
 main() {
@@ -2740,9 +2882,18 @@ main() {
     -h|--help) usage; exit 0 ;;
     -v|--version) echo "proxy_manager.sh ${SCRIPT_VERSION}"; exit 0 ;;
     --status)
-      check_root
-      check_debian
+      check_root; check_debian; ensure_sandbox
       print_status_once
+      exit 0
+      ;;
+    --diagnose)
+      check_root; check_debian; ensure_sandbox
+      run_diagnose
+      exit 0
+      ;;
+    --links)
+      check_root; check_debian; ensure_sandbox
+      show_all_links
       exit 0
       ;;
     "")
@@ -2756,6 +2907,7 @@ main() {
   check_root
   check_debian
   ensure_sandbox
+  preflight || true
   main_loop
 }
 
