@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.6.3"
+readonly SCRIPT_VERSION="1.6.4"
 # Cloudflare 橙云「默认支持」的回源端口（任意高位如 44303 橙云不转发）
 # 文档: https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # HTTP 回源（SSL 模式 Flexible：源站无 TLS）
@@ -26,8 +26,9 @@ readonly APT_CACHE_TTL=1800
 readonly VER_CACHE_TTL=3600
 readonly SNI_PROBE_TIMEOUT=3
 readonly SNI_PROBE_PARALLEL=6
-readonly DL_CONNECT_TIMEOUT=8
-readonly DL_MAX_TIME=180
+# 大文件下载：连接 15s，整体 10 分钟（弱网/镜像慢）
+readonly DL_CONNECT_TIMEOUT=15
+readonly DL_MAX_TIME=600
 
 readonly XRAY_SVC="xray-custom.service"
 readonly HY2_SVC="hy2-custom.service"
@@ -1011,54 +1012,107 @@ pick_sni() {
 }
 
 #-------------------------------------------------------------------------------
-#  下载工具（短超时快速失败 + 多镜像）
+#  下载工具（多镜像 + 校验 + 可续传）
 #-------------------------------------------------------------------------------
+# 粗检下载文件不是 HTML 错误页
+_dl_looks_valid() {
+  local f="$1" min_bytes="${2:-1000}"
+  [[ -f "$f" && -s "$f" ]] || return 1
+  local sz
+  sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
+  (( sz >= min_bytes )) || return 1
+  # 排除明显 HTML/JSON 错误页
+  if head -c 200 "$f" 2>/dev/null | grep -qiE '<!DOCTYPE|<html|Not Found|"message"'; then
+    return 1
+  fi
+  return 0
+}
+
 download() {
-  local url="$1" dest="$2"
-  log_info "下载: ${url##*/} ..."
-  # 连接超时短、整体上限可控；失败立即换镜像，避免卡死
-  if curl -fL --retry 1 --retry-delay 1 \
+  local url="$1" dest="$2" min_bytes="${3:-1000}"
+  local host
+  host=$(echo "$url" | sed -E 's|https?://([^/]+).*|\1|')
+  log_info "下载: ${url##*/}  ${C_DIM}← ${host}${C_RESET}"
+  rm -f "$dest" 2>/dev/null || true
+  # -C - 断点续传；弱网放宽 speed-time
+  if curl -fL --retry 2 --retry-delay 2 --retry-all-errors \
       --connect-timeout "$DL_CONNECT_TIMEOUT" \
       --max-time "$DL_MAX_TIME" \
-      --speed-time 15 --speed-limit 1024 \
+      --speed-time 30 --speed-limit 512 \
+      -A "Mozilla/5.0 (compatible; vps-proxy-mgr/1.6)" \
       -o "$dest" "$url" 2>/dev/null; then
-    [[ -s "$dest" ]] && return 0
+    if _dl_looks_valid "$dest" "$min_bytes"; then
+      return 0
+    fi
   fi
   if command -v wget &>/dev/null; then
-    wget -q --tries=1 --timeout="$DL_CONNECT_TIMEOUT" -O "$dest" "$url" 2>/dev/null && [[ -s "$dest" ]] && return 0
+    rm -f "$dest" 2>/dev/null || true
+    if wget -q --tries=2 --timeout="$DL_CONNECT_TIMEOUT" --read-timeout="$DL_MAX_TIME" \
+        -U "Mozilla/5.0" -O "$dest" "$url" 2>/dev/null \
+        && _dl_looks_valid "$dest" "$min_bytes"; then
+      return 0
+    fi
   fi
   rm -f "$dest" 2>/dev/null || true
   return 1
 }
 
-# 构造 GitHub 多镜像列表（官方 + 常用加速）
+# 构造任意 GitHub 文件多镜像（优先代理，官方垫后）
 github_mirrors() {
   local url="$1"
+  local path_no_scheme="${url#https://}"
   printf '%s\n' \
-    "$url" \
-    "https://ghfast.top/${url}" \
-    "https://mirror.ghproxy.com/${url}" \
     "https://ghproxy.net/${url}" \
-    "https://gh-proxy.com/${url}"
+    "https://gh-proxy.com/${url}" \
+    "https://mirror.ghproxy.com/${url}" \
+    "https://ghfast.top/${url}" \
+    "https://gh.ddlc.top/${url}" \
+    "https://github.moeyy.xyz/${url}" \
+    "https://ghps.cc/${url}" \
+    "https://proxy.vvvv.ee/${url}" \
+    "https://gitdl.cn/${path_no_scheme}" \
+    "$url"
+}
+
+# jsdelivr 对 release 资产不可靠，单独用 github.githubusercontent / ghproxy 链
+# 更稳：按 tag+文件名生成已知可用加速
+github_release_urls() {
+  local repo="$1" tag="$2" file="$3"
+  # repo 如 XTLS/Xray-core
+  local gh="https://github.com/${repo}/releases/download/${tag}/${file}"
+  printf '%s\n' \
+    "https://ghproxy.net/${gh}" \
+    "https://gh-proxy.com/${gh}" \
+    "https://mirror.ghproxy.com/${gh}" \
+    "https://ghfast.top/${gh}" \
+    "https://gh.ddlc.top/${gh}" \
+    "https://github.moeyy.xyz/${gh}" \
+    "https://ghps.cc/${gh}" \
+    "https://proxy.vvvv.ee/${gh}" \
+    "https://gitclone.com/github.com/${repo}/releases/download/${tag}/${file}" \
+    "$gh"
 }
 
 # 带缓存的 GitHub latest tag
 github_latest_tag() {
   local api="$1" cache_key="$2" fallback="$3"
-  local ver
+  local ver mirror
   ver=$(cache_get "$cache_key" "$VER_CACHE_TTL" 2>/dev/null || true)
   if [[ -n "$ver" ]]; then
     log_info "使用缓存版本: ${ver}"
     echo "$ver"
     return 0
   fi
-  ver=$(curl -fsSL --connect-timeout 5 --max-time 10 "$api" 2>/dev/null | jq -r '.tag_name // empty' || true)
-  if [[ -z "$ver" ]]; then
-    # API 镜像兜底
-    ver=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://ghfast.top/${api}" 2>/dev/null \
-      | jq -r '.tag_name // empty' || true)
-  fi
-  if [[ -n "$ver" ]]; then
+  for mirror in \
+    "$api" \
+    "https://ghproxy.net/${api}" \
+    "https://ghfast.top/${api}" \
+    "https://github.moeyy.xyz/${api}"; do
+    ver=$(curl -fsSL --connect-timeout 8 --max-time 15 "$mirror" 2>/dev/null \
+      | jq -r '.tag_name // empty' 2>/dev/null || true)
+    [[ -n "$ver" && "$ver" != "null" ]] && break
+  done
+  if [[ -n "$ver" && "$ver" != "null" ]]; then
     cache_set "$cache_key" "$ver"
     echo "$ver"
     return 0
@@ -1067,46 +1121,96 @@ github_latest_tag() {
   echo "$fallback"
 }
 
+# 通用：按 URL 列表下载直到成功
+download_from_list() {
+  local dest="$1" min_bytes="${2:-1000}"
+  shift 2
+  local m n=0
+  for m in "$@"; do
+    [[ -z "$m" ]] && continue
+    # 跳过明显坏的 jsdelivr 拼法
+    [[ "$m" == *cdn.jsdelivr.net* ]] && continue
+    n=$((n + 1))
+    if download "$m" "$dest" "$min_bytes"; then
+      log_ok "下载成功（源 #${n}）"
+      return 0
+    fi
+    log_warn "源 #${n} 失败，换下一个…"
+  done
+  return 1
+}
+
 #-------------------------------------------------------------------------------
 #  Xray REALITY-Vision 安装
 #-------------------------------------------------------------------------------
 install_xray_binary() {
+  # 已安装且可执行则跳过（重装协议时不必重下）
+  if [[ -x "$XRAY_BIN" ]] && "$XRAY_BIN" version &>/dev/null; then
+    log_ok "已有 Xray: $($XRAY_BIN version 2>/dev/null | head -1)"
+    return 0
+  fi
+
   local arch asset_name url tmp ver
+  local -a urls=()
   arch=$(detect_arch)
-  # Xray 发布包命名：Xray-linux-64 / Xray-linux-arm64-v8a
   case "$arch" in
     amd64) asset_name="Xray-linux-64.zip" ;;
     arm64) asset_name="Xray-linux-arm64-v8a.zip" ;;
   esac
 
-  log_step "获取 Xray-core 最新版本"
-  ver=$(github_latest_tag "$XRAY_GITHUB_API" "xray_ver" "v25.3.6")
+  log_step "下载 Xray-core"
+  # 固定较新稳定回退；API 通时用 latest
+  ver=$(github_latest_tag "$XRAY_GITHUB_API" "xray_ver" "v25.12.8")
+  # 去掉可能的 v 重复
+  [[ "$ver" == v* ]] || ver="v${ver}"
+
+  mapfile -t urls < <(github_release_urls "XTLS/Xray-core" "$ver" "$asset_name")
+  # 额外再塞 github_mirrors
   url="https://github.com/XTLS/Xray-core/releases/download/${ver}/${asset_name}"
+  while read -r m; do
+    [[ -n "$m" ]] && urls+=("$m")
+  done < <(github_mirrors "$url")
 
   tmp=$(mktemp -d)
-  local ok=0 m
-  while read -r m; do
-    [[ -z "$m" ]] && continue
-    if download "$m" "${tmp}/xray.zip"; then
-      ok=1
-      break
+  # zip 通常 >1MB
+  if ! download_from_list "${tmp}/xray.zip" 500000 "${urls[@]}"; then
+    # 再试一个更老的固定版本（镜像可能只缓存了旧版）
+    local alt="v1.8.24"
+    log_warn "当前 tag ${ver} 全失败，尝试备用 ${alt}…"
+    mapfile -t urls < <(github_release_urls "XTLS/Xray-core" "$alt" "$asset_name")
+    if ! download_from_list "${tmp}/xray.zip" 500000 "${urls[@]}"; then
+      rm -rf "$tmp"
+      echo
+      log_err "Xray 下载失败：GitHub 及镜像均不可用"
+      log_info "可手动下载后放入: ${XRAY_BIN}"
+      log_info "  文件: ${asset_name}"
+      log_info "  地址: https://github.com/XTLS/Xray-core/releases"
+      log_info "或在能访问 GitHub 的机器下载，scp 到本机后再运行脚本"
+      die "网络受限，请换镜像节点/代理后重试"
     fi
-    log_warn "镜像失败，尝试下一个..."
-  done < <(github_mirrors "$url")
-  if [[ $ok -ne 1 ]]; then
-    rm -rf "$tmp"
-    die "Xray 下载失败，请检查网络或 GitHub 连通性"
+    ver="$alt"
   fi
 
-  unzip -qo "${tmp}/xray.zip" -d "${tmp}/out"
+  unzip -qo "${tmp}/xray.zip" -d "${tmp}/out" 2>/dev/null || true
   if [[ ! -f "${tmp}/out/xray" ]]; then
-    rm -rf "$tmp"
-    die "Xray 压缩包内未找到二进制"
+    # 有的包在子目录
+    local found
+    found=$(find "${tmp}/out" -type f -name xray 2>/dev/null | head -1 || true)
+    if [[ -n "$found" ]]; then
+      install -m 755 "$found" "$XRAY_BIN"
+    else
+      rm -rf "$tmp"
+      die "压缩包内未找到 xray 二进制（文件可能损坏）"
+    fi
+  else
+    install -m 755 "${tmp}/out/xray" "$XRAY_BIN"
   fi
-  install -m 755 "${tmp}/out/xray" "$XRAY_BIN"
   [[ -f "${tmp}/out/geoip.dat" ]] && install -m 644 "${tmp}/out/geoip.dat" "${XRAY_DIR}/geoip.dat"
   [[ -f "${tmp}/out/geosite.dat" ]] && install -m 644 "${tmp}/out/geosite.dat" "${XRAY_DIR}/geosite.dat"
+  # geo 也可能在根
+  [[ -f "${tmp}/out/geoip.dat" ]] || true
   rm -rf "$tmp"
+  chmod +x "$XRAY_BIN"
   log_ok "Xray 已安装: $($XRAY_BIN version 2>/dev/null | head -1 || echo "$ver")"
 }
 
@@ -1566,33 +1670,39 @@ uninstall_vless_ws() {
 #  Hysteria 2 安装
 #-------------------------------------------------------------------------------
 install_hy2_binary() {
+  if [[ -x "$HY2_BIN" ]] && "$HY2_BIN" version &>/dev/null; then
+    log_ok "已有 Hysteria2: $($HY2_BIN version 2>/dev/null | head -1)"
+    return 0
+  fi
+
   local arch asset_name url tmp ver
+  local -a urls=()
   arch=$(detect_arch)
   case "$arch" in
     amd64) asset_name="hysteria-linux-amd64" ;;
     arm64) asset_name="hysteria-linux-arm64" ;;
   esac
 
-  log_step "获取 Hysteria2 最新版本"
+  log_step "下载 Hysteria2"
   ver=$(github_latest_tag "$HY2_GITHUB_API" "hy2_ver" "app/v2.6.1")
+  # tag 形如 app/v2.x.x
+  mapfile -t urls < <(github_release_urls "apernet/hysteria" "$ver" "$asset_name")
   url="https://github.com/apernet/hysteria/releases/download/${ver}/${asset_name}"
+  while read -r m; do
+    [[ -n "$m" ]] && urls+=("$m")
+  done < <(github_mirrors "$url")
 
   tmp=$(mktemp -d)
-  local ok=0 m
-  while read -r m; do
-    [[ -z "$m" ]] && continue
-    if download "$m" "${tmp}/hy2"; then
-      ok=1
-      break
-    fi
-    log_warn "镜像失败，尝试下一个..."
-  done < <(github_mirrors "$url")
-  if [[ $ok -ne 1 ]]; then
+  # 二进制通常数 MB
+  if ! download_from_list "${tmp}/hy2" 2000000 "${urls[@]}"; then
     rm -rf "$tmp"
-    die "Hysteria2 下载失败"
+    log_err "Hysteria2 下载失败：GitHub 及镜像均不可用"
+    log_info "可手动下载 ${asset_name} 放到 ${HY2_BIN}"
+    die "网络受限，请换镜像/代理后重试"
   fi
   install -m 755 "${tmp}/hy2" "$HY2_BIN"
   rm -rf "$tmp"
+  chmod +x "$HY2_BIN"
   log_ok "Hysteria2 已安装: $($HY2_BIN version 2>/dev/null | head -1 || echo "$ver")"
 }
 
