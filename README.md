@@ -27,11 +27,18 @@ curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get
 |------|----------|-----------|
 | REALITY | 随机高位 TCP | 否（直连） |
 | Hysteria2 | 随机高位 UDP + 可选跳跃/混淆 | 否（直连） |
-| VLESS+WS | **仅 CF 允许端口**（HTTP 8080… / HTTPS 8443…） | 是（橙云） |
+| VLESS+WS | **仅 CF HTTPS 端口**（8443/2053/…/443） | 是（橙云） |
+
+### VLESS+WS · 仅支持 CF SSL = Full
+
+- 源站：**HTTPS + 自签证书**（脚本自动生成）
+- CF 面板：**SSL/TLS = Full**（不要 Flexible，不要 Full strict）
+- 源站端口必须在：`8443 2053 2083 2087 2096 443`（默认优先 **8443**）
+- 客户端：域名/优选 IP · **443** · TLS · WS · **无 flow**
+- 安全组放行源站 TCP 端口（如 8443）
 
 - Hy2 分享链接：`主端口 + mport=段`（勿写成 `ip:start-end`）
-- WS 客户端：**无 flow**；CF 源站须在官方端口列表内
-- 节点自动导出：`/etc/vps_proxy_mgr/share/client-links.txt`
+- 节点导出：`/etc/vps_proxy_mgr/share/client-links.txt`
 
 ## 非交互
 

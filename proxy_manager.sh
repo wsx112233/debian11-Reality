@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.7.0"
-# Cloudflare 橙云默认回源端口
+readonly SCRIPT_VERSION="1.7.1"
+# Cloudflare 橙云 HTTPS 回源端口（本脚本 VLESS+WS 固定 SSL=Full，源站必须 TLS）
 # https://developers.cloudflare.com/fundamentals/reference/network-ports/
+# 优先 8443（443 常被宝塔/nginx 占用）
+readonly CF_HTTPS_ORIGIN_PORTS=(8443 2053 2083 2087 2096 443)
+# 保留 HTTP 列表仅用于诊断提示（不再作为安装选项）
 readonly CF_HTTP_ORIGIN_PORTS=(80 8080 8880 2052 2082 2086 2095)
-readonly CF_HTTPS_ORIGIN_PORTS=(443 2053 2083 2087 2096 8443)
 readonly SANDBOX_ROOT="/etc/vps_proxy_mgr"
 readonly BIN_DIR="/usr/local/bin"
 readonly XRAY_BIN="${BIN_DIR}/vps_xray"
@@ -291,77 +293,46 @@ _first_free_port() {
   return 1
 }
 
-# 是否属于 CF 允许列表
-_is_cf_http_port() {
-  local p="$1" x
-  for x in "${CF_HTTP_ORIGIN_PORTS[@]}"; do [[ "$p" == "$x" ]] && return 0; done
-  return 1
-}
 _is_cf_https_port() {
   local p="$1" x
   for x in "${CF_HTTPS_ORIGIN_PORTS[@]}"; do [[ "$p" == "$x" ]] && return 0; done
   return 1
 }
 
-# 选择 CF 回源模式 + 端口
-# stdout 仅输出端口；模式写入 state: XRAY_WS_CF_MODE=http|https
-# http  → Flexible，源站无 TLS，端口 ∈ CF_HTTP
-# https → Full，源站自签 TLS，端口 ∈ CF_HTTPS
+# VLESS+WS 固定 CF SSL=Full：源站 HTTPS + 自签证书，端口 ∈ CF HTTPS 列表
+# stdout 仅端口；state: XRAY_WS_CF_MODE=https
 pick_cf_origin_port() {
-  local mode suggested p ok x
-  echo -e "  ${C_DIM}Cloudflare 橙云只转发下列端口，其它高位端口（如 44303）无效：${C_RESET}" >&2
-  echo -e "  ${C_DIM}  HTTP : ${CF_HTTP_ORIGIN_PORTS[*]}${C_RESET}" >&2
-  echo -e "  ${C_DIM}  HTTPS: ${CF_HTTPS_ORIGIN_PORTS[*]}${C_RESET}" >&2
-  echo >&2
-  echo -e "  ${C_WHITE}[1]${C_RESET} HTTP 回源  ${C_DIM}CF SSL=Flexible · 源站无证书 · 推荐${C_RESET}" >&2
-  echo -e "  ${C_WHITE}[2]${C_RESET} HTTPS 回源 ${C_DIM}CF SSL=Full · 源站自签 TLS${C_RESET}" >&2
-  mode=$(ask "回源方式" "1")
-  case "$mode" in
-    2|https|HTTPS|full|Full)
-      mode="https"
-      suggested=$(_first_free_port "${CF_HTTPS_ORIGIN_PORTS[@]}") || suggested="8443"
-      state_set "XRAY_WS_CF_MODE" "https"
-      echo -e "  ${C_DIM}请在 CF 将 SSL/TLS 设为 Full（不要 Full strict）${C_RESET}" >&2
-      ;;
-    *)
-      mode="http"
-      suggested=$(_first_free_port "${CF_HTTP_ORIGIN_PORTS[@]}") || suggested="8080"
-      state_set "XRAY_WS_CF_MODE" "http"
-      echo -e "  ${C_DIM}请在 CF 将 SSL/TLS 设为 Flexible${C_RESET}" >&2
-      ;;
-  esac
-
+  local suggested p
+  state_set "XRAY_WS_CF_MODE" "https"
+  suggested=$(_first_free_port "${CF_HTTPS_ORIGIN_PORTS[@]}") || suggested="8443"
+  echo -e "  ${C_CYAN}●${C_RESET} VLESS+WS 固定 ${C_BOLD}CF SSL = Full${C_RESET}（源站 HTTPS 自签）" >&2
+  echo -e "  ${C_DIM}允许端口: ${CF_HTTPS_ORIGIN_PORTS[*]}${C_RESET}" >&2
+  echo -e "  ${C_DIM}CF 面板: SSL/TLS → Full（不要 Full strict）· 橙云 · WebSockets On${C_RESET}" >&2
+  echo -e "  ${C_DIM}勿用 8080/Flexible 或任意高位端口（如 44303）${C_RESET}" >&2
   while true; do
-    p=$(ask "源站端口（回车采用 ${suggested}）" "$suggested")
+    p=$(ask "源站 HTTPS 端口（回车采用 ${suggested}）" "$suggested")
     if ! [[ "$p" =~ ^[0-9]+$ ]] || (( p < 1 || p > 65535 )); then
       log_warn "请输入有效端口" >&2
       continue
     fi
-    ok=0
-    if [[ "$mode" == "https" ]]; then
-      _is_cf_https_port "$p" && ok=1
-      if [[ $ok -ne 1 ]]; then
-        log_warn "${p} 不在 CF HTTPS 列表: ${CF_HTTPS_ORIGIN_PORTS[*]}" >&2
-        if ! confirm "仍使用？（橙云通常失败）"; then continue; fi
-      fi
-    else
-      _is_cf_http_port "$p" && ok=1
-      if [[ $ok -ne 1 ]]; then
-        log_warn "${p} 不在 CF HTTP 列表: ${CF_HTTP_ORIGIN_PORTS[*]}" >&2
-        if ! confirm "仍使用？（橙云通常失败）"; then continue; fi
-      fi
+    if ! _is_cf_https_port "$p"; then
+      log_warn "${p} 不在 CF HTTPS 列表: ${CF_HTTPS_ORIGIN_PORTS[*]}" >&2
+      if ! confirm "仍使用？（橙云 Full 通常失败）"; then continue; fi
     fi
     if port_in_use "$p" "tcp"; then
       log_warn "端口 ${p} 已被占用" >&2
       port_who "$p" "tcp" | sed 's/^/    /' >&2 || true
-      if ! confirm "仍要使用？"; then continue; fi
+      if ! confirm "仍要使用？"; then
+        suggested=$(_first_free_port "${CF_HTTPS_ORIGIN_PORTS[@]}") || suggested="8443"
+        continue
+      fi
     fi
     printf '%s\n' "$p"
     return 0
   done
 }
 
-# VLESS+WS 源站自签证书（仅 CF Full / HTTPS 回源时需要）
+# VLESS+WS 源站自签证书（CF Full 回源必需；Full strict 会失败）
 gen_ws_origin_cert() {
   local cn="${1:-localhost}"
   mkdir -p "$XRAY_DIR"
@@ -372,7 +343,7 @@ gen_ws_origin_cert() {
     -subj "/CN=${cn}" \
     >/dev/null 2>&1
   chmod 600 "${XRAY_DIR}/ws-origin.key" "${XRAY_DIR}/ws-origin.crt"
-  log_ok "已生成源站 TLS 证书（CN=${cn}，配合 CF Full）"
+  log_ok "源站 TLS 自签证书已生成（CN=${cn} · 配合 CF Full）"
 }
 
 # 生成随机字符串
@@ -1351,28 +1322,12 @@ EOF
     w_path=$(state_get "XRAY_WS_PATH")
     w_host=$(state_get "XRAY_WS_HOST")
     local w_mode w_sec_block
-    w_mode=$(state_get "XRAY_WS_CF_MODE")
-    [[ -z "$w_mode" ]] && w_mode="http"
+    # 固定 Full：源站 TLS 自签（不再支持 Flexible/明文）
+    state_set "XRAY_WS_CF_MODE" "https"
     [[ -n "$w_port" && -n "$w_path" ]] || die "VLESS+WS 状态不完整，请重装"
     need=1
     [[ -n "$inbounds" ]] && inbounds+=","
-    # http: 源站无 TLS → CF Flexible
-    # https: 源站自签 TLS → CF Full（客户端仍连 CF:443）
-    if [[ "$w_mode" == "https" ]]; then
-      [[ -f "${XRAY_DIR}/ws-origin.crt" ]] || gen_ws_origin_cert "${w_host}"
-      w_sec_block=$(cat <<SEOF
-        "security": "tls",
-        "tlsSettings": {
-          "certificates": [{
-            "certificateFile": "${XRAY_DIR}/ws-origin.crt",
-            "keyFile": "${XRAY_DIR}/ws-origin.key"
-          }]
-        },
-SEOF
-)
-    else
-      w_sec_block='"security": "none",'
-    fi
+    [[ -f "${XRAY_DIR}/ws-origin.crt" ]] || gen_ws_origin_cert "${w_host}"
     inbounds+=$(cat <<EOF
     {
       "tag": "vless-ws",
@@ -1385,7 +1340,13 @@ SEOF
       },
       "streamSettings": {
         "network": "ws",
-        ${w_sec_block}
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [{
+            "certificateFile": "${XRAY_DIR}/ws-origin.crt",
+            "keyFile": "${XRAY_DIR}/ws-origin.key"
+          }]
+        },
         "wsSettings": {
           "path": "${w_path}",
           "headers": { "Host": "${w_host}" }
@@ -1626,10 +1587,10 @@ uninstall_reality() {
 }
 
 install_vless_ws() {
-  local t0 port path host uuid def_host cf_mode
+  local t0 port path host uuid def_host
   t0=$(date +%s)
-  ui_section "安装 VLESS + WebSocket（CF 优选 IP）"
-  log_info "源站仅用 CF 默认允许端口（HTTP+HTTPS 列表）· 客户端仍连 CF:443"
+  ui_section "安装 VLESS + WebSocket（CF · 仅 Full）"
+  log_info "源站 HTTPS 自签 · CF SSL 必须 Full · 端口 ∈ ${CF_HTTPS_ORIGIN_PORTS[*]}"
   ensure_sandbox
   install_deps
 
@@ -1644,10 +1605,7 @@ install_vless_ws() {
     state_set "XRAY_WS_INSTALLED" "0"
   fi
 
-  # CF 允许的 HTTP / HTTPS 回源端口（禁止任意高位）
   port=$(pick_cf_origin_port)
-  cf_mode=$(state_get "XRAY_WS_CF_MODE")
-  [[ -z "$cf_mode" ]] && cf_mode="http"
   path=$(pick_ws_path)
   def_host=$(get_public_ipv4 2>/dev/null || get_public_ip)
   host=$(ask "域名 Host（须已在 CF 橙云）" "${def_host}")
@@ -1659,13 +1617,12 @@ install_vless_ws() {
   if [[ ! -x "$XRAY_BIN" ]]; then
     install_xray_binary
   fi
-  if [[ "$cf_mode" == "https" ]]; then
-    gen_ws_origin_cert "$host"
-  fi
+  gen_ws_origin_cert "$host"
   uuid=$(ensure_xray_uuid)
   state_set "XRAY_WS_PORT" "$port"
   state_set "XRAY_WS_PATH" "$path"
   state_set "XRAY_WS_HOST" "$host"
+  state_set "XRAY_WS_CF_MODE" "https"
   state_set "XRAY_WS_INSTALLED" "1"
   rebuild_xray_config
   fw_allow "$port" "tcp" "vps_proxy_mgr_ws"
@@ -1673,12 +1630,9 @@ install_vless_ws() {
   write_xray_systemd
 
   echo
-  log_ok "VLESS+WS 完成 · 源站 ${port}${path} · 模式 ${cf_mode} · Host ${host}"
-  if [[ "$cf_mode" == "https" ]]; then
-    log_info "CF: 橙云 · SSL=Full · 安全组 TCP ${port} · 客户端 443+TLS · 无 flow"
-  else
-    log_info "CF: 橙云 · SSL=Flexible · 安全组 TCP ${port} · 客户端 443+TLS · 无 flow"
-  fi
+  log_ok "VLESS+WS 完成 · 源站 https://0.0.0.0:${port}${path} · Host ${host}"
+  log_info "CF 必设: ①橙云 ②SSL/TLS = ${C_BOLD}Full${C_RESET}（非 Flexible / 非 Full strict）"
+  log_info "安全组 TCP ${port} · 客户端 443+TLS · 无 flow · path=${path}"
   show_ws_link
 }
 
@@ -2505,17 +2459,11 @@ show_ws_link() {
   link_cf=$(build_ws_link "$host")
   link_direct=$(build_ws_link "${ip4:-$host}" "direct")
   ui_section "VLESS + WebSocket (CF)"
-  local cfm
-  cfm=$(state_get "XRAY_WS_CF_MODE"); [[ -z "$cfm" ]] && cfm="http"
   echo -e "  UUID     ${uuid}"
-  echo -e "  源站     ${C_GREEN}${port}${C_RESET}${path}  ${C_DIM}(仅 CF 允许端口)${C_RESET}"
+  echo -e "  源站     ${C_GREEN}https :${port}${C_RESET}${path}  ${C_DIM}(CF HTTPS 端口)${C_RESET}"
   echo -e "  Host     ${host}"
-  echo -e "  回源     ${cfm}  ·  客户端 域名/优选IP:443 TLS · 无 flow"
-  if [[ "$cfm" == "https" ]]; then
-    echo -e "  CF SSL   ${C_YELLOW}Full${C_RESET} · 安全组 ${port}/tcp · 源站自签 TLS"
-  else
-    echo -e "  CF SSL   ${C_YELLOW}Flexible${C_RESET} · 安全组 ${port}/tcp · 源站无 TLS"
-  fi
+  echo -e "  客户端   域名/优选IP · 443 · TLS · 无 flow"
+  echo -e "  CF SSL   ${C_YELLOW}${C_BOLD}Full${C_RESET}（仅此模式）· 安全组 ${port}/tcp · 源站自签"
   hr
   echo -e "  ${C_CYAN}经 CF（地址可改为优选 IP）${C_RESET}"
   echo "  $link_cf"
@@ -2573,36 +2521,30 @@ run_diagnose() {
     log_ok "REALITY  :$(state_get XRAY_PORT)  sni=$(state_get XRAY_SNI)"
   fi
   if is_ws_installed; then
-    local wp wm
+    local wp
     wp=$(state_get XRAY_WS_PORT)
-    wm=$(state_get XRAY_WS_CF_MODE); [[ -z "$wm" ]] && wm="http"
-    log_ok "VLESS-WS :${wp}$(state_get XRAY_WS_PATH)  mode=${wm}"
-    local cf_ok=0 x
-    if [[ "$wm" == "https" ]]; then
-      for x in "${CF_HTTPS_ORIGIN_PORTS[@]}"; do [[ "$wp" == "$x" ]] && cf_ok=1; done
+    log_ok "VLESS-WS :${wp}$(state_get XRAY_WS_PATH)  mode=https(Full)"
+    if _is_cf_https_port "$wp"; then
+      log_ok "WS 源站端口在 CF HTTPS 列表内（Full 回源）"
     else
-      for x in "${CF_HTTP_ORIGIN_PORTS[@]}"; do [[ "$wp" == "$x" ]] && cf_ok=1; done
+      log_err "WS 源站端口 ${wp} 不在 CF HTTPS 列表 → Full 橙云失败"
+      log_tip "请用: ${CF_HTTPS_ORIGIN_PORTS[*]}（推荐 8443）"
     fi
-    if [[ $cf_ok -eq 1 ]]; then
-      log_ok "WS 源站端口在 CF 允许列表内"
-    else
-      log_err "WS 源站端口 ${wp} 不在 CF 允许列表 → 橙云必失败"
-      log_tip "HTTP 用 8080 等 · HTTPS 用 8443 等；勿用 44303 这类高位"
-    fi
-    # 本机 101 探测
+    # 本机 HTTPS WS 101 探测（自签 -k）
     if command -v curl &>/dev/null && [[ -n "$wp" ]]; then
       local code
-      code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 \
+      code=$(curl -skS -o /dev/null -w '%{http_code}' --connect-timeout 2 \
         -H "Connection: Upgrade" -H "Upgrade: websocket" \
         -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
         -H "Host: $(state_get XRAY_WS_HOST)" \
-        "http://127.0.0.1:${wp}$(state_get XRAY_WS_PATH)" 2>/dev/null || echo "000")
+        "https://127.0.0.1:${wp}$(state_get XRAY_WS_PATH)" 2>/dev/null || echo "000")
       if [[ "$code" == "101" ]]; then
-        log_ok "本机 WS 握手 101 OK（源站正常）"
+        log_ok "本机 HTTPS WS 握手 101 OK（源站 Full 就绪）"
       else
-        log_warn "本机 WS 探测 HTTP ${code}（期望 101）"
+        log_warn "本机 HTTPS WS 探测 HTTP ${code}（期望 101；检查证书与监听）"
       fi
     fi
+    log_tip "CF 必须 SSL=Full（非 Flexible / 非 Full strict）"
   fi
   if is_hy2_installed; then
     log_ok "Hy2      :$(state_get HY2_PORT)/udp  hop=$(state_get HY2_HOP)"
@@ -2611,7 +2553,7 @@ run_diagnose() {
   fi
   hr
   log_info "公网 IP: $(get_public_ip)"
-  log_tip "安全组须放行各协议端口；VLESS-WS 还须 CF 橙云 + Flexible/Full"
+  log_tip "安全组放行各端口；VLESS-WS：橙云 + SSL=Full + HTTPS 源站端口"
   if [[ -f "$SHARE_LINKS" ]]; then
     log_tip "已保存链接: cat ${SHARE_LINKS}"
   fi
@@ -2708,7 +2650,7 @@ menu_install() {
   printf "  ${C_WHITE}[3]${C_RESET}  %-22s %b%s\n" "VLESS+WS (CF)" "$(status_label ws)" "$(status_extra ws)"
   hr
   echo -e "  ${C_DIM}多选 ${C_CYAN}1 3${C_DIM} / ${C_CYAN}13${C_DIM} · 全选 ${C_CYAN}a${C_DIM} · 返回 ${C_CYAN}0${C_RESET}"
-  log_tip "REALITY/Hy2=随机高位端口 · WS=仅 CF 允许端口(8080/8443…)"
+  log_tip "REALITY/Hy2=高位直连 · WS=CF Full · 源站 HTTPS(8443…)"
   echo
   raw=$(ask "要安装哪些" "")
   [[ -z "$raw" || "$raw" == "0" ]] && { log_info "已取消"; return 0; }
