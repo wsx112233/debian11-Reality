@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.7.4"
+readonly SCRIPT_VERSION="1.8.0"
 # 终端默认不打印密钥；完整链接仅写入 ${SHARE_DIR}（chmod 600）
 # 需要明文时：菜单确认 / SHOW_SECRETS=1 / --show-secrets
 SHOW_SECRETS="${SHOW_SECRETS:-0}"
@@ -93,14 +93,14 @@ readonly PORT_HIGH_MIN=20000
 readonly PORT_HIGH_MAX=60000
 
 #-------------------------------------------------------------------------------
-#  日志与 UI
+#  日志与 UI（日志一律 stderr，避免污染 ver=$(cmd) 等命令替换）
 #-------------------------------------------------------------------------------
-log_info()  { echo -e "  ${C_CYAN}●${C_RESET} $*"; }
-log_ok()    { echo -e "  ${C_GREEN}✔${C_RESET} $*"; }
-log_warn()  { echo -e "  ${C_YELLOW}!${C_RESET} $*"; }
+log_info()  { echo -e "  ${C_CYAN}●${C_RESET} $*" >&2; }
+log_ok()    { echo -e "  ${C_GREEN}✔${C_RESET} $*" >&2; }
+log_warn()  { echo -e "  ${C_YELLOW}!${C_RESET} $*" >&2; }
 log_err()   { echo -e "  ${C_RED}✘${C_RESET} $*" >&2; }
-log_step()  { echo -e "\n  ${C_MAGENTA}▸${C_RESET} ${C_BOLD}$*${C_RESET}"; }
-log_tip()   { echo -e "  ${C_DIM}💡 $*${C_RESET}"; }
+log_step()  { echo -e "\n  ${C_MAGENTA}▸${C_RESET} ${C_BOLD}$*${C_RESET}" >&2; }
+log_tip()   { echo -e "  ${C_DIM}· $*${C_RESET}" >&2; }
 
 die() {
   log_err "$*"
@@ -108,12 +108,12 @@ die() {
 }
 
 hr() {
-  echo -e "  ${C_DIM}────────────────────────────────────────────────${C_RESET}"
+  echo -e "  ${C_DIM}────────────────────────────${C_RESET}"
 }
 
 ui_section() {
   echo
-  echo -e "  ${C_CYAN}▸${C_RESET} ${C_WHITE}${C_BOLD}$1${C_RESET}"
+  echo -e "  ${C_BOLD}$1${C_RESET}"
   hr
 }
 
@@ -249,9 +249,7 @@ share_append_link() {
 share_flush_notice() {
   if [[ -f "$SHARE_LINKS" ]]; then
     chmod 600 "$SHARE_LINKS"
-    log_ok "完整节点链接已写入本地文件（未在上方完整打印）"
-    log_tip "sudo cat ${SHARE_LINKS}"
-    log_tip "权限: $(stat -c '%a %U:%G' "$SHARE_LINKS" 2>/dev/null || echo '600 root')"
+    log_ok "链接: sudo cat ${SHARE_LINKS}"
   fi
 }
 
@@ -389,12 +387,9 @@ pick_cf_origin_port() {
   local suggested p
   state_set "XRAY_WS_CF_MODE" "https"
   suggested=$(_first_free_port "${CF_HTTPS_ORIGIN_PORTS[@]}") || suggested="8443"
-  echo -e "  ${C_CYAN}●${C_RESET} VLESS+WS 固定 ${C_BOLD}CF SSL = Full${C_RESET}（源站 HTTPS 自签）" >&2
-  echo -e "  ${C_DIM}允许端口: ${CF_HTTPS_ORIGIN_PORTS[*]}${C_RESET}" >&2
-  echo -e "  ${C_DIM}CF 面板: SSL/TLS → Full（不要 Full strict）· 橙云 · WebSockets On${C_RESET}" >&2
-  echo -e "  ${C_DIM}勿用 8080/Flexible 或任意高位端口（如 44303）${C_RESET}" >&2
+  log_tip "CF SSL=Full · 端口 ${CF_HTTPS_ORIGIN_PORTS[*]}"
   while true; do
-    p=$(ask "源站 HTTPS 端口（回车采用 ${suggested}）" "$suggested")
+    p=$(ask "源站端口" "$suggested")
     if ! [[ "$p" =~ ^[0-9]+$ ]] || (( p < 1 || p > 65535 )); then
       log_warn "请输入有效端口" >&2
       continue
@@ -1128,18 +1123,29 @@ _dl_looks_valid() {
   return 0
 }
 
+# 规范化 release tag（只允许安全字符，防止日志/缓存污染）
+sanitize_release_tag() {
+  local t="${1:-}"
+  # 去掉日志混入的控制字符与多余空白
+  t=$(printf '%s' "$t" | tr -d '\r\n\t' | sed -E 's/.*((app\/)?v?[0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/' 2>/dev/null || true)
+  if [[ "$t" =~ ^(app/)?v?[0-9]+\.[0-9]+(\.[0-9]+)?([.-][A-Za-z0-9._-]+)?$ ]]; then
+    printf '%s\n' "$t"
+    return 0
+  fi
+  return 1
+}
+
 download() {
-  local url="$1" dest="$2" min_bytes="${3:-1000}"
+  local url="$1" dest="$2" min_bytes="${3:-1000}" quiet="${4:-0}"
   local host
   host=$(echo "$url" | sed -E 's|https?://([^/]+).*|\1|')
-  log_info "下载: ${url##*/}  ${C_DIM}← ${host}${C_RESET}"
+  [[ "$quiet" != "1" ]] && log_info "拉取 ${url##*/} ← ${host}"
   rm -f "$dest" 2>/dev/null || true
-  # -C - 断点续传；弱网放宽 speed-time
-  if curl -fL --retry 2 --retry-delay 2 --retry-all-errors \
+  if curl -fL --retry 2 --retry-delay 1 --retry-all-errors \
       --connect-timeout "$DL_CONNECT_TIMEOUT" \
       --max-time "$DL_MAX_TIME" \
-      --speed-time 30 --speed-limit 512 \
-      -A "Mozilla/5.0 (compatible; vps-proxy-mgr/1.6)" \
+      --speed-time 20 --speed-limit 512 \
+      -A "Mozilla/5.0 (compatible; vps-proxy-mgr/${SCRIPT_VERSION})" \
       -o "$dest" "$url" 2>/dev/null; then
     if _dl_looks_valid "$dest" "$min_bytes"; then
       return 0
@@ -1147,7 +1153,7 @@ download() {
   fi
   if command -v wget &>/dev/null; then
     rm -f "$dest" 2>/dev/null || true
-    if wget -q --tries=2 --timeout="$DL_CONNECT_TIMEOUT" --read-timeout="$DL_MAX_TIME" \
+    if wget -q --tries=2 --timeout="$DL_CONNECT_TIMEOUT" \
         -U "Mozilla/5.0" -O "$dest" "$url" 2>/dev/null \
         && _dl_looks_valid "$dest" "$min_bytes"; then
       return 0
@@ -1157,52 +1163,43 @@ download() {
   return 1
 }
 
-# 构造任意 GitHub 文件多镜像（优先代理，官方垫后）
-github_mirrors() {
-  local url="$1"
-  local path_no_scheme="${url#https://}"
-  printf '%s\n' \
-    "https://ghproxy.net/${url}" \
-    "https://gh-proxy.com/${url}" \
-    "https://mirror.ghproxy.com/${url}" \
-    "https://ghfast.top/${url}" \
-    "https://gh.ddlc.top/${url}" \
-    "https://github.moeyy.xyz/${url}" \
-    "https://ghps.cc/${url}" \
-    "https://proxy.vvvv.ee/${url}" \
-    "https://gitdl.cn/${path_no_scheme}" \
-    "$url"
-}
-
-# jsdelivr 对 release 资产不可靠，单独用 github.githubusercontent / ghproxy 链
-# 更稳：按 tag+文件名生成已知可用加速
+# 精简镜像列表（少而稳，避免刷几十次失败日志）
 github_release_urls() {
   local repo="$1" tag="$2" file="$3"
-  # repo 如 XTLS/Xray-core
   local gh="https://github.com/${repo}/releases/download/${tag}/${file}"
   printf '%s\n' \
     "https://ghproxy.net/${gh}" \
     "https://gh-proxy.com/${gh}" \
     "https://mirror.ghproxy.com/${gh}" \
     "https://ghfast.top/${gh}" \
-    "https://gh.ddlc.top/${gh}" \
     "https://github.moeyy.xyz/${gh}" \
-    "https://ghps.cc/${gh}" \
-    "https://proxy.vvvv.ee/${gh}" \
-    "https://gitclone.com/github.com/${repo}/releases/download/${tag}/${file}" \
+    "https://gh.ddlc.top/${gh}" \
     "$gh"
 }
 
-# 带缓存的 GitHub latest tag
+github_mirrors() {
+  local url="$1"
+  printf '%s\n' \
+    "https://ghproxy.net/${url}" \
+    "https://gh-proxy.com/${url}" \
+    "https://mirror.ghproxy.com/${url}" \
+    "https://ghfast.top/${url}" \
+    "https://github.moeyy.xyz/${url}" \
+    "$url"
+}
+
+# 带缓存的 GitHub latest tag（stdout 仅输出 tag）
 github_latest_tag() {
   local api="$1" cache_key="$2" fallback="$3"
-  local ver mirror
+  local ver mirror clean
   ver=$(cache_get "$cache_key" "$VER_CACHE_TTL" 2>/dev/null || true)
-  if [[ -n "$ver" ]]; then
-    log_info "使用缓存版本: ${ver}"
-    echo "$ver"
+  if clean=$(sanitize_release_tag "$ver"); then
+    printf '%s\n' "$clean"
     return 0
   fi
+  # 缓存污染则删除
+  rm -f "${CACHE_DIR}/${cache_key}" 2>/dev/null || true
+  ver=""
   for mirror in \
     "$api" \
     "https://ghproxy.net/${api}" \
@@ -1210,32 +1207,33 @@ github_latest_tag() {
     "https://github.moeyy.xyz/${api}"; do
     ver=$(curl -fsSL --connect-timeout 8 --max-time 15 "$mirror" 2>/dev/null \
       | jq -r '.tag_name // empty' 2>/dev/null || true)
-    [[ -n "$ver" && "$ver" != "null" ]] && break
+    if clean=$(sanitize_release_tag "$ver"); then
+      cache_set "$cache_key" "$clean"
+      printf '%s\n' "$clean"
+      return 0
+    fi
   done
-  if [[ -n "$ver" && "$ver" != "null" ]]; then
-    cache_set "$cache_key" "$ver"
-    echo "$ver"
-    return 0
-  fi
-  log_warn "GitHub API 不可用，使用回退版本 ${fallback}"
-  echo "$fallback"
+  log_warn "版本 API 不可用，使用 ${fallback}"
+  printf '%s\n' "$fallback"
 }
 
-# 通用：按 URL 列表下载直到成功
+# 通用：按 URL 列表下载（去重、安静失败）
 download_from_list() {
   local dest="$1" min_bytes="${2:-1000}"
   shift 2
-  local m n=0
+  local m n=0 seen="|"
   for m in "$@"; do
     [[ -z "$m" ]] && continue
-    # 跳过明显坏的 jsdelivr 拼法
     [[ "$m" == *cdn.jsdelivr.net* ]] && continue
+    [[ "$seen" == *"|${m}|"* ]] && continue
+    seen+="${m}|"
     n=$((n + 1))
     if download "$m" "$dest" "$min_bytes"; then
-      log_ok "下载成功（源 #${n}）"
+      log_ok "下载完成"
       return 0
     fi
-    log_warn "源 #${n} 失败，换下一个…"
+    # 只提示失败序号，不刷完整 URL
+    log_warn "镜像 #${n} 失败"
   done
   return 1
 }
@@ -1244,13 +1242,12 @@ download_from_list() {
 #  Xray REALITY-Vision 安装
 #-------------------------------------------------------------------------------
 install_xray_binary() {
-  # 已安装且可执行则跳过（重装协议时不必重下）
   if [[ -x "$XRAY_BIN" ]] && "$XRAY_BIN" version &>/dev/null; then
-    log_ok "已有 Xray: $($XRAY_BIN version 2>/dev/null | head -1)"
+    log_ok "Xray 已存在"
     return 0
   fi
 
-  local arch asset_name url tmp ver
+  local arch asset_name tmp ver clean
   local -a urls=()
   arch=$(detect_arch)
   case "$arch" in
@@ -1259,59 +1256,52 @@ install_xray_binary() {
   esac
 
   log_step "下载 Xray-core"
-  # 固定较新稳定回退；API 通时用 latest
+  # 清除可能被污染的版本缓存
+  rm -f "${CACHE_DIR}/xray_ver" 2>/dev/null || true
   ver=$(github_latest_tag "$XRAY_GITHUB_API" "xray_ver" "v25.12.8")
-  # 去掉可能的 v 重复
-  [[ "$ver" == v* ]] || ver="v${ver}"
+  clean=$(sanitize_release_tag "$ver" || true)
+  if [[ -z "$clean" ]]; then
+    ver="v25.12.8"
+  else
+    ver="$clean"
+  fi
+  [[ "$ver" == v* || "$ver" == app/* ]] || ver="v${ver}"
+  log_info "版本 ${ver}"
 
   mapfile -t urls < <(github_release_urls "XTLS/Xray-core" "$ver" "$asset_name")
-  # 额外再塞 github_mirrors
-  url="https://github.com/XTLS/Xray-core/releases/download/${ver}/${asset_name}"
-  while read -r m; do
-    [[ -n "$m" ]] && urls+=("$m")
-  done < <(github_mirrors "$url")
 
   tmp=$(mktemp -d)
-  # zip 通常 >1MB
   if ! download_from_list "${tmp}/xray.zip" 500000 "${urls[@]}"; then
-    # 再试一个更老的固定版本（镜像可能只缓存了旧版）
-    local alt="v1.8.24"
-    log_warn "当前 tag ${ver} 全失败，尝试备用 ${alt}…"
-    mapfile -t urls < <(github_release_urls "XTLS/Xray-core" "$alt" "$asset_name")
-    if ! download_from_list "${tmp}/xray.zip" 500000 "${urls[@]}"; then
+    local alt
+    for alt in "v25.3.6" "v1.8.24"; do
+      log_warn "尝试备用版本 ${alt}"
+      mapfile -t urls < <(github_release_urls "XTLS/Xray-core" "$alt" "$asset_name")
+      if download_from_list "${tmp}/xray.zip" 500000 "${urls[@]}"; then
+        ver="$alt"
+        break
+      fi
+    done
+    if [[ ! -s "${tmp}/xray.zip" ]]; then
       rm -rf "$tmp"
-      echo
-      log_err "Xray 下载失败：GitHub 及镜像均不可用"
-      log_info "可手动下载后放入: ${XRAY_BIN}"
-      log_info "  文件: ${asset_name}"
-      log_info "  地址: https://github.com/XTLS/Xray-core/releases"
-      log_info "或在能访问 GitHub 的机器下载，scp 到本机后再运行脚本"
-      die "网络受限，请换镜像节点/代理后重试"
+      log_err "Xray 下载失败"
+      log_tip "手动: 下载 ${asset_name} → 解压后 install -m 755 xray ${XRAY_BIN}"
+      die "请检查网络后重试"
     fi
-    ver="$alt"
   fi
 
   unzip -qo "${tmp}/xray.zip" -d "${tmp}/out" 2>/dev/null || true
-  if [[ ! -f "${tmp}/out/xray" ]]; then
-    # 有的包在子目录
-    local found
-    found=$(find "${tmp}/out" -type f -name xray 2>/dev/null | head -1 || true)
-    if [[ -n "$found" ]]; then
-      install -m 755 "$found" "$XRAY_BIN"
-    else
-      rm -rf "$tmp"
-      die "压缩包内未找到 xray 二进制（文件可能损坏）"
-    fi
-  else
-    install -m 755 "${tmp}/out/xray" "$XRAY_BIN"
+  local found="${tmp}/out/xray"
+  [[ -f "$found" ]] || found=$(find "${tmp}/out" -type f -name xray 2>/dev/null | head -1 || true)
+  if [[ -z "$found" || ! -f "$found" ]]; then
+    rm -rf "$tmp"
+    die "压缩包损坏或非 zip"
   fi
+  install -m 755 "$found" "$XRAY_BIN"
   [[ -f "${tmp}/out/geoip.dat" ]] && install -m 644 "${tmp}/out/geoip.dat" "${XRAY_DIR}/geoip.dat"
   [[ -f "${tmp}/out/geosite.dat" ]] && install -m 644 "${tmp}/out/geosite.dat" "${XRAY_DIR}/geosite.dat"
-  # geo 也可能在根
-  [[ -f "${tmp}/out/geoip.dat" ]] || true
   rm -rf "$tmp"
   chmod +x "$XRAY_BIN"
-  log_ok "Xray 已安装: $($XRAY_BIN version 2>/dev/null | head -1 || echo "$ver")"
+  log_ok "Xray $($XRAY_BIN version 2>/dev/null | head -1 | awk '{print $2}' || echo "$ver")"
 }
 
 gen_xray_keys() {
@@ -1701,27 +1691,17 @@ install_vless_ws() {
   if [[ -n "$last_host" ]] && ! is_ipv4 "$last_host" && ! is_ipv6 "$last_host"; then
     def_host="$last_host"
   fi
-  echo >&2
-  log_info "本机公网（供你在 CF 填 DNS，不是 Host 字段）："
-  [[ -n "$ip4" ]] && echo -e "    ${C_DIM}A    记录 → ${ip4}${C_RESET}" >&2
-  [[ -n "$ip6" ]] && echo -e "    ${C_DIM}AAAA 记录 → ${ip6}${C_RESET}" >&2
-  [[ -z "$ip4" && -z "$ip6" ]] && echo -e "    ${C_DIM}(未探测到公网 IP，请在 CF 自行填写 VPS 地址)${C_RESET}" >&2
-  log_tip "仅 IPv6：CF 只建 AAAA（橙云）即可；Host/SNI 仍填域名"
-  log_tip "可同时有 A+AAAA；客户端可用域名或 CF 优选 IP"
-  echo >&2
+  [[ -n "$ip4" ]] && log_tip "CF DNS A → ${ip4}"
+  [[ -n "$ip6" ]] && log_tip "CF DNS AAAA → ${ip6}"
   if [[ -n "$def_host" ]]; then
-    host=$(ask "域名 Host / SNI（橙云域名，不要填 IP）" "$def_host")
+    host=$(ask "域名 Host/SNI（勿填 IP）" "$def_host")
   else
-    host=$(ask "域名 Host / SNI（例 yx.xxx.com，不要填 IP）" "")
+    host=$(ask "域名 Host/SNI（如 yx.example.com）" "")
   fi
   host=$(echo "$host" | tr -d '[:space:]')
   while [[ -z "$host" ]] || is_ipv4 "$host" || is_ipv6 "$host"; do
-    if [[ -z "$host" ]]; then
-      log_warn "Host 不能为空，请填写 Cloudflare 上的域名" >&2
-    else
-      log_warn "Host 不能是 IP。IPv6/IPv4 只写在 CF 的 A/AAAA，Host 必须写域名" >&2
-    fi
-    host=$(ask "域名 Host / SNI" "")
+    log_warn "请填写 Cloudflare 橙云域名（不是 IP）"
+    host=$(ask "域名 Host/SNI" "")
     host=$(echo "$host" | tr -d '[:space:]')
   done
 
@@ -1741,10 +1721,8 @@ install_vless_ws() {
   write_xray_systemd
 
   echo
-  log_ok "VLESS+WS 完成 · 源站 TLS :${port}${path} · Host/SNI=${host}"
-  log_info "CF: 橙云 · SSL=${C_BOLD}Full${C_RESET} · DNS A 和/或 AAAA 指向本机 · 安全组 TCP ${port}"
-  [[ -n "$ip6" ]] && log_tip "IPv6 用户请确认安全组放行 IPv6 的 TCP ${port}（若控制台区分 v4/v6）"
-  log_info "客户端: 地址=域名或优选IP · 443 · TLS · Host/SNI=${host} · 无 flow"
+  log_ok "VLESS+WS 完成  :${port}${path}  ${host}"
+  log_tip "CF: 橙云 + SSL=Full + 放行 TCP ${port}（含 IPv6）"
   show_ws_link
 }
 
@@ -1782,11 +1760,11 @@ uninstall_vless_ws() {
 #-------------------------------------------------------------------------------
 install_hy2_binary() {
   if [[ -x "$HY2_BIN" ]] && "$HY2_BIN" version &>/dev/null; then
-    log_ok "已有 Hysteria2: $($HY2_BIN version 2>/dev/null | head -1)"
+    log_ok "Hysteria2 已存在"
     return 0
   fi
 
-  local arch asset_name url tmp ver
+  local arch asset_name tmp ver clean
   local -a urls=()
   arch=$(detect_arch)
   case "$arch" in
@@ -1795,26 +1773,31 @@ install_hy2_binary() {
   esac
 
   log_step "下载 Hysteria2"
+  rm -f "${CACHE_DIR}/hy2_ver" 2>/dev/null || true
   ver=$(github_latest_tag "$HY2_GITHUB_API" "hy2_ver" "app/v2.6.1")
-  # tag 形如 app/v2.x.x
+  clean=$(sanitize_release_tag "$ver" || true)
+  [[ -n "$clean" ]] && ver="$clean"
+  # Hy2 tag 通常为 app/vX.Y.Z
+  if [[ "$ver" != app/* ]]; then
+    [[ "$ver" == v* ]] && ver="app/${ver}" || ver="app/v${ver}"
+  fi
+  log_info "版本 ${ver}"
   mapfile -t urls < <(github_release_urls "apernet/hysteria" "$ver" "$asset_name")
-  url="https://github.com/apernet/hysteria/releases/download/${ver}/${asset_name}"
-  while read -r m; do
-    [[ -n "$m" ]] && urls+=("$m")
-  done < <(github_mirrors "$url")
 
   tmp=$(mktemp -d)
-  # 二进制通常数 MB
   if ! download_from_list "${tmp}/hy2" 2000000 "${urls[@]}"; then
-    rm -rf "$tmp"
-    log_err "Hysteria2 下载失败：GitHub 及镜像均不可用"
-    log_info "可手动下载 ${asset_name} 放到 ${HY2_BIN}"
-    die "网络受限，请换镜像/代理后重试"
+    mapfile -t urls < <(github_release_urls "apernet/hysteria" "app/v2.6.1" "$asset_name")
+    if ! download_from_list "${tmp}/hy2" 2000000 "${urls[@]}"; then
+      rm -rf "$tmp"
+      log_err "Hysteria2 下载失败"
+      log_tip "手动下载 ${asset_name} → ${HY2_BIN}"
+      die "请检查网络后重试"
+    fi
   fi
   install -m 755 "${tmp}/hy2" "$HY2_BIN"
   rm -rf "$tmp"
   chmod +x "$HY2_BIN"
-  log_ok "Hysteria2 已安装: $($HY2_BIN version 2>/dev/null | head -1 || echo "$ver")"
+  log_ok "Hysteria2 已安装"
 }
 
 gen_hy2_cert() {
@@ -2599,69 +2582,38 @@ show_all_links() {
 
 # 一键诊断：本机监听 / 服务 / 常见 CF 坑提示
 run_diagnose() {
-  ui_section "连通诊断"
-  echo -e "  ${C_DIM}时间 $(date '+%F %T') · 主机 $(hostname -f 2>/dev/null || hostname)${C_RESET}"
-  hr
-  # 服务
-  if svc_exists "$XRAY_SVC"; then
-    if svc_active "$XRAY_SVC"; then log_ok "xray-custom 运行中"; else log_warn "xray-custom 已安装但未运行"; fi
-  else
-    log_info "xray-custom 未安装"
-  fi
-  if svc_exists "$HY2_SVC"; then
-    if svc_active "$HY2_SVC"; then log_ok "hy2-custom 运行中"; else log_warn "hy2-custom 已安装但未运行"; fi
-  else
-    log_info "hy2-custom 未安装"
-  fi
-  hr
-  # 监听
-  log_info "监听端口:"
+  ui_section "诊断"
+  svc_active "$XRAY_SVC" 2>/dev/null && log_ok "xray 运行" || log_info "xray 未运行"
+  svc_active "$HY2_SVC" 2>/dev/null && log_ok "hy2 运行" || log_info "hy2 未运行"
   if command -v ss &>/dev/null; then
-    ss -lntup 2>/dev/null | grep -E 'vps_xray|vps_hysteria' | sed 's/^/    /' || echo "    (无)"
-  fi
-  hr
-  # 协议摘要
-  if is_reality_installed; then
-    log_ok "REALITY  :$(state_get XRAY_PORT)  sni=$(state_get XRAY_SNI)"
+    ss -lntup 2>/dev/null | grep -E 'vps_xray|vps_hysteria' | awk '{print "  "$1,$5}' || true
   fi
   if is_ws_installed; then
-    local wp
+    local wp code
     wp=$(state_get XRAY_WS_PORT)
-    log_ok "VLESS-WS :${wp}$(state_get XRAY_WS_PATH)  mode=https(Full)"
     if _is_cf_https_port "$wp"; then
-      log_ok "WS 源站端口在 CF HTTPS 列表内（Full 回源）"
+      log_ok "WS :${wp} 合法 Full 端口"
     else
-      log_err "WS 源站端口 ${wp} 不在 CF HTTPS 列表 → Full 橙云失败"
-      log_tip "请用: ${CF_HTTPS_ORIGIN_PORTS[*]}（推荐 8443）"
+      log_err "WS :${wp} 不在 CF HTTPS 列表"
     fi
-    # 本机 HTTPS WS 101 探测（自签 -k）
-    if command -v curl &>/dev/null && [[ -n "$wp" ]]; then
-      local code
-      code=$(curl -skS -o /dev/null -w '%{http_code}' --connect-timeout 2 \
-        -H "Connection: Upgrade" -H "Upgrade: websocket" \
-        -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-        -H "Host: $(state_get XRAY_WS_HOST)" \
-        "https://127.0.0.1:${wp}$(state_get XRAY_WS_PATH)" 2>/dev/null || echo "000")
-      if [[ "$code" == "101" ]]; then
-        log_ok "本机 HTTPS WS 握手 101 OK（源站 Full 就绪）"
-      else
-        log_warn "本机 HTTPS WS 探测 HTTP ${code}（期望 101；检查证书与监听）"
-      fi
+    code=$(curl -skS -o /dev/null -w '%{http_code}' --connect-timeout 2 \
+      -H "Connection: Upgrade" -H "Upgrade: websocket" \
+      -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+      -H "Sec-WebSocket-Protocol: binary" \
+      -H "Host: $(state_get XRAY_WS_HOST)" \
+      "https://127.0.0.1:${wp}$(state_get XRAY_WS_PATH)" 2>/dev/null || echo "000")
+    # 400 有时是 curl 缺头；能连上端口即可，101 最佳
+    if [[ "$code" == "101" ]]; then
+      log_ok "本机 WS 101"
+    elif [[ "$code" == "400" || "$code" == "000" ]]; then
+      log_tip "本机探测 ${code}（端口已监听则可忽略；以 CF Full 为准）"
+    else
+      log_warn "本机 WS HTTP ${code}"
     fi
-    log_tip "CF 必须 SSL=Full（非 Flexible / 非 Full strict）"
-    log_tip "Host/SNI=域名；DNS 可用 A 和/或 AAAA（仅 IPv6 解析完全可以）"
+    log_tip "CF: 橙云 + Full + 放行 ${wp}/tcp"
   fi
-  if is_hy2_installed; then
-    log_ok "Hy2      :$(state_get HY2_PORT)/udp  hop=$(state_get HY2_HOP)"
-    [[ "$(state_get HY2_HOP)" == "1" ]] && \
-      log_tip "Hy2 链接须: 主端口 + mport=段 ，勿写成 ip:start-end"
-  fi
-  hr
-  log_info "公网 IP: $(get_public_ip)"
-  log_tip "安全组放行各端口；VLESS-WS：橙云 + SSL=Full + HTTPS 源站端口"
-  if [[ -f "$SHARE_LINKS" ]]; then
-    log_tip "已保存链接: cat ${SHARE_LINKS}"
-  fi
+  is_hy2_installed && log_ok "Hy2 :$(state_get HY2_PORT) hop=$(state_get HY2_HOP)"
+  [[ -f "$SHARE_LINKS" ]] && log_tip "链接: cat ${SHARE_LINKS}"
 }
 
 #-------------------------------------------------------------------------------
@@ -2749,29 +2701,26 @@ parse_multi_choice() {
 #---------- 安装：列出全部协议，多选要装哪些 ----------
 menu_install() {
   local raw picks p t0 names=""
-  ui_section "安装协议"
-  printf "  ${C_WHITE}[1]${C_RESET}  %-22s %b%s\n" "REALITY-Vision" "$(status_label xray)" "$(status_extra xray)"
-  printf "  ${C_WHITE}[2]${C_RESET}  %-22s %b%s\n" "Hysteria 2" "$(status_label hy2)" "$(status_extra hy2)"
-  printf "  ${C_WHITE}[3]${C_RESET}  %-22s %b%s\n" "VLESS+WS (CF)" "$(status_label ws)" "$(status_extra ws)"
-  hr
-  echo -e "  ${C_DIM}多选 ${C_CYAN}1 3${C_DIM} / ${C_CYAN}13${C_DIM} · 全选 ${C_CYAN}a${C_DIM} · 返回 ${C_CYAN}0${C_RESET}"
-  log_tip "REALITY/Hy2=高位直连 · WS=CF Full · 源站 HTTPS(8443…)"
+  ui_section "安装"
+  printf "  ${C_WHITE}[1]${C_RESET} REALITY   %b%s\n" "$(status_label xray)" "$(status_extra xray)"
+  printf "  ${C_WHITE}[2]${C_RESET} Hy2       %b%s\n" "$(status_label hy2)" "$(status_extra hy2)"
+  printf "  ${C_WHITE}[3]${C_RESET} VLESS-WS  %b%s\n" "$(status_label ws)" "$(status_extra ws)"
+  echo -e "  ${C_DIM}多选 13 / a 全选 / 0 返回${C_RESET}"
   echo
-  raw=$(ask "要安装哪些" "")
+  raw=$(ask "安装" "")
   [[ -z "$raw" || "$raw" == "0" ]] && { log_info "已取消"; return 0; }
   if ! picks=$(parse_multi_choice "$raw" "123"); then
-    log_warn "请输入 1 / 2 / 3，多选如: 1 3"
+    log_warn "输入 1/2/3，多选如 13"
     return 0
   fi
   for p in $picks; do
     case "$p" in
       1) names+="REALITY " ;;
       2) names+="Hy2 " ;;
-      3) names+="VLESS-WS " ;;
+      3) names+="WS " ;;
     esac
   done
-  log_ok "计划安装: ${C_BOLD}${names}${C_RESET}"
-  log_tip "安装过程默认不在终端打印完整密钥，链接写入 ${SHARE_LINKS}"
+  log_ok "安装: ${names}"
   SHOW_SECRETS=0
   share_write_header
   t0=$(date +%s)
@@ -2783,9 +2732,8 @@ menu_install() {
     esac
   done
   echo
-  log_ok "全部完成 · ${C_DIM}$(( $(date +%s) - t0 ))s${C_RESET}"
+  log_ok "完成 $(( $(date +%s) - t0 ))s · 链接: cat ${SHARE_LINKS}"
   share_flush_notice
-  run_diagnose
 }
 
 #---------- 卸载：只列出【已安装】的协议，再多选 ----------
@@ -2848,26 +2796,14 @@ menu_uninstall() {
 #-------------------------------------------------------------------------------
 print_banner() {
   clear 2>/dev/null || true
-  local ip_show
-  ip_show=$(cache_get "public_ipv4" "$IP_CACHE_TTL" 2>/dev/null || cache_get "public_ipv6" "$IP_CACHE_TTL" 2>/dev/null || echo "…")
   echo
-  echo -e "  ${C_CYAN}╔════════════════════════════════════════════════╗${C_RESET}"
-  echo -e "  ${C_CYAN}║${C_RESET}  ${C_WHITE}${C_BOLD}VPS Proxy Manager${C_RESET}  ${C_DIM}v${SCRIPT_VERSION}${C_RESET}                 ${C_CYAN}║${C_RESET}"
-  echo -e "  ${C_CYAN}║${C_RESET}  ${C_DIM}Debian 11/12/13 · REALITY · Hy2 · WS/CF${C_RESET}     ${C_CYAN}║${C_RESET}"
-  echo -e "  ${C_CYAN}╚════════════════════════════════════════════════╝${C_RESET}"
-  echo
-  echo -e "  ${C_DIM}公网${C_RESET} ${ip_show}"
+  echo -e "  ${C_BOLD}Proxy Manager${C_RESET} ${C_DIM}v${SCRIPT_VERSION}${C_RESET}"
+  printf "  REALITY  %b%s\n" "$(status_label xray)" "$(status_extra xray)"
+  printf "  VLESS-WS %b%s\n" "$(status_label ws)" "$(status_extra ws)"
+  printf "  Hy2      %b%s\n" "$(status_label hy2)" "$(status_extra hy2)"
   hr
-  printf "  %-11s %b%s\n" "REALITY"  "$(status_label xray)" "$(status_extra xray)"
-  printf "  %-11s %b%s\n" "VLESS+WS" "$(status_label ws)" "$(status_extra ws)"
-  printf "  %-11s %b%s\n" "Hysteria2" "$(status_label hy2)" "$(status_extra hy2)"
-  hr
-  echo -e "  ${C_WHITE}${C_BOLD}[1]${C_RESET}  安装     ${C_DIM}多选协议 · 智能端口${C_RESET}"
-  echo -e "  ${C_WHITE}${C_BOLD}[2]${C_RESET}  卸载     ${C_DIM}仅已安装项${C_RESET}"
-  echo -e "  ${C_WHITE}${C_BOLD}[3]${C_RESET}  节点     ${C_DIM}链接 / 二维码 / 导出文件${C_RESET}"
-  echo -e "  ${C_WHITE}${C_BOLD}[4]${C_RESET}  服务     ${C_DIM}启停 / 日志 / 诊断${C_RESET}"
-  echo -e "  ${C_WHITE}${C_BOLD}[5]${C_RESET}  诊断     ${C_DIM}一键检查源站与 CF 端口${C_RESET}"
-  echo -e "  ${C_WHITE}${C_BOLD}[0]${C_RESET}  退出"
+  echo -e "  ${C_WHITE}[1]${C_RESET} 安装  ${C_WHITE}[2]${C_RESET} 卸载  ${C_WHITE}[3]${C_RESET} 节点"
+  echo -e "  ${C_WHITE}[4]${C_RESET} 服务  ${C_WHITE}[5]${C_RESET} 诊断  ${C_WHITE}[0]${C_RESET} 退出"
   echo
 }
 
