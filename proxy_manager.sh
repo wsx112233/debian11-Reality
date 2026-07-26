@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.7.1"
+readonly SCRIPT_VERSION="1.7.2"
 # Cloudflare 橙云 HTTPS 回源端口（本脚本 VLESS+WS 固定 SSL=Full，源站必须 TLS）
 # https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # 优先 8443（443 常被宝塔/nginx 占用）
@@ -1587,7 +1587,7 @@ uninstall_reality() {
 }
 
 install_vless_ws() {
-  local t0 port path host uuid def_host
+  local t0 port path host uuid def_host ip4 ip6 last_host
   t0=$(date +%s)
   ui_section "安装 VLESS + WebSocket（CF · 仅 Full）"
   log_info "源站 HTTPS 自签 · CF SSL 必须 Full · 端口 ∈ ${CF_HTTPS_ORIGIN_PORTS[*]}"
@@ -1607,12 +1607,39 @@ install_vless_ws() {
 
   port=$(pick_cf_origin_port)
   path=$(pick_ws_path)
-  def_host=$(get_public_ipv4 2>/dev/null || get_public_ip)
-  host=$(ask "域名 Host（须已在 CF 橙云）" "${def_host}")
-  if is_ipv4 "$host" || is_ipv6 "$host"; then
-    log_warn "Host 为 IP 时无法正确走 CF SNI，请填域名"
-    host=$(ask "CF 域名" "$host")
+
+  # Host/SNI 必须是域名，绝不能默认填服务器 IP（IPv4/IPv6 都不行）
+  # 用户若用 AAAA 解析到本机，只要域名橙云即可，与本机默认提示 IP 无关
+  ip4=$(get_public_ipv4 2>/dev/null || true)
+  ip6=$(get_public_ipv6 2>/dev/null || true)
+  last_host=$(state_get "XRAY_WS_HOST")
+  def_host=""
+  if [[ -n "$last_host" ]] && ! is_ipv4 "$last_host" && ! is_ipv6 "$last_host"; then
+    def_host="$last_host"
   fi
+  echo >&2
+  log_info "本机公网（供你在 CF 填 DNS，不是 Host 字段）："
+  [[ -n "$ip4" ]] && echo -e "    ${C_DIM}A    记录 → ${ip4}${C_RESET}" >&2
+  [[ -n "$ip6" ]] && echo -e "    ${C_DIM}AAAA 记录 → ${ip6}${C_RESET}" >&2
+  [[ -z "$ip4" && -z "$ip6" ]] && echo -e "    ${C_DIM}(未探测到公网 IP，请在 CF 自行填写 VPS 地址)${C_RESET}" >&2
+  log_tip "仅 IPv6：CF 只建 AAAA（橙云）即可；Host/SNI 仍填域名"
+  log_tip "可同时有 A+AAAA；客户端可用域名或 CF 优选 IP"
+  echo >&2
+  if [[ -n "$def_host" ]]; then
+    host=$(ask "域名 Host / SNI（橙云域名，不要填 IP）" "$def_host")
+  else
+    host=$(ask "域名 Host / SNI（例 yx.xxx.com，不要填 IP）" "")
+  fi
+  host=$(echo "$host" | tr -d '[:space:]')
+  while [[ -z "$host" ]] || is_ipv4 "$host" || is_ipv6 "$host"; do
+    if [[ -z "$host" ]]; then
+      log_warn "Host 不能为空，请填写 Cloudflare 上的域名" >&2
+    else
+      log_warn "Host 不能是 IP。IPv6/IPv4 只写在 CF 的 A/AAAA，Host 必须写域名" >&2
+    fi
+    host=$(ask "域名 Host / SNI" "")
+    host=$(echo "$host" | tr -d '[:space:]')
+  done
 
   if [[ ! -x "$XRAY_BIN" ]]; then
     install_xray_binary
@@ -1630,9 +1657,10 @@ install_vless_ws() {
   write_xray_systemd
 
   echo
-  log_ok "VLESS+WS 完成 · 源站 https://0.0.0.0:${port}${path} · Host ${host}"
-  log_info "CF 必设: ①橙云 ②SSL/TLS = ${C_BOLD}Full${C_RESET}（非 Flexible / 非 Full strict）"
-  log_info "安全组 TCP ${port} · 客户端 443+TLS · 无 flow · path=${path}"
+  log_ok "VLESS+WS 完成 · 源站 TLS :${port}${path} · Host/SNI=${host}"
+  log_info "CF: 橙云 · SSL=${C_BOLD}Full${C_RESET} · DNS A 和/或 AAAA 指向本机 · 安全组 TCP ${port}"
+  [[ -n "$ip6" ]] && log_tip "IPv6 用户请确认安全组放行 IPv6 的 TCP ${port}（若控制台区分 v4/v6）"
+  log_info "客户端: 地址=域名或优选IP · 443 · TLS · Host/SNI=${host} · 无 flow"
   show_ws_link
 }
 
@@ -2459,11 +2487,16 @@ show_ws_link() {
   link_cf=$(build_ws_link "$host")
   link_direct=$(build_ws_link "${ip4:-$host}" "direct")
   ui_section "VLESS + WebSocket (CF)"
+  local tip4 tip6
+  tip4=$(get_public_ipv4 2>/dev/null || true)
+  tip6=$(get_public_ipv6 2>/dev/null || true)
   echo -e "  UUID     ${uuid}"
   echo -e "  源站     ${C_GREEN}https :${port}${C_RESET}${path}  ${C_DIM}(CF HTTPS 端口)${C_RESET}"
-  echo -e "  Host     ${host}"
-  echo -e "  客户端   域名/优选IP · 443 · TLS · 无 flow"
-  echo -e "  CF SSL   ${C_YELLOW}${C_BOLD}Full${C_RESET}（仅此模式）· 安全组 ${port}/tcp · 源站自签"
+  echo -e "  Host/SNI ${C_GREEN}${host}${C_RESET}  ${C_DIM}(必须是域名，不是 IP)${C_RESET}"
+  echo -e "  客户端   地址=域名或 CF 优选 IP · 443 · TLS · 无 flow"
+  echo -e "  CF SSL   ${C_YELLOW}${C_BOLD}Full${C_RESET} · 橙云 · 安全组 ${port}/tcp · 源站自签"
+  [[ -n "$tip4" ]] && echo -e "  ${C_DIM}DNS A    → ${tip4}${C_RESET}"
+  [[ -n "$tip6" ]] && echo -e "  ${C_DIM}DNS AAAA → ${tip6}  (仅 IPv6 解析时用这条)${C_RESET}"
   hr
   echo -e "  ${C_CYAN}经 CF（地址可改为优选 IP）${C_RESET}"
   echo "  $link_cf"
@@ -2545,6 +2578,7 @@ run_diagnose() {
       fi
     fi
     log_tip "CF 必须 SSL=Full（非 Flexible / 非 Full strict）"
+    log_tip "Host/SNI=域名；DNS 可用 A 和/或 AAAA（仅 IPv6 解析完全可以）"
   fi
   if is_hy2_installed; then
     log_ok "Hy2      :$(state_get HY2_PORT)/udp  hop=$(state_get HY2_HOP)"
