@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.7.2"
+readonly SCRIPT_VERSION="1.7.3"
 # Cloudflare 橙云 HTTPS 回源端口（本脚本 VLESS+WS 固定 SSL=Full，源站必须 TLS）
 # https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # 优先 8443（443 常被宝塔/nginx 占用）
@@ -227,18 +227,17 @@ random_high_port() {
 }
 
 # 随机 WebSocket 路径
-# 注意：不要用 /api/ /admin/ /wp- 等，Cloudflare WAF/Bot 易拦截导致 Latency/Speed Error
+# 避免: /api /admin /wp- (WAF) · 避免 .png/.jpg/.css/.js (CF 易当静态缓存)
 random_ws_path() {
   local a b c
   a=$(openssl rand -hex 6 2>/dev/null || printf '%x' $((RANDOM * RANDOM)))
   b=$(openssl rand -hex 4 2>/dev/null || printf '%x' $RANDOM)
   c=$(openssl rand -hex 3 2>/dev/null || printf '%x' $RANDOM)
-  case $((RANDOM % 6)) in
+  case $((RANDOM % 5)) in
     0) echo "/ray/${a}" ;;
     1) echo "/ws/${a}${b}" ;;
     2) echo "/vless/${a}" ;;
-    3) echo "/download/${a}.dat" ;;
-    4) echo "/img/${a}/${b}.png" ;;
+    3) echo "/tunnel/${a}/${b}" ;;
     *) echo "/${a}/${b}${c}" ;;
   esac
 }
