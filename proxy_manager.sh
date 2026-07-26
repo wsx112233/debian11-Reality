@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.8.0"
-# 终端默认不打印密钥；完整链接仅写入 ${SHARE_DIR}（chmod 600）
-# 需要明文时：菜单确认 / SHOW_SECRETS=1 / --show-secrets
-SHOW_SECRETS="${SHOW_SECRETS:-0}"
+readonly SCRIPT_VERSION="1.8.1"
+# 完整导入链接默认不打印到终端（防截图）；UUID/端口/path 等正常显示
+# 链接明文：菜单确认 / SHOW_LINKS=1 / --show-links
+SHOW_LINKS="${SHOW_LINKS:-0}"
 # Cloudflare 橙云 HTTPS 回源端口（本脚本 VLESS+WS 固定 SSL=Full，源站必须 TLS）
 # https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # 优先 8443（443 常被宝塔/nginx 占用）
@@ -143,75 +143,40 @@ preflight() {
   return 0
 }
 
-# ---------- 敏感信息脱敏（终端默认不回显密钥）----------
-# 中间打码：保留前 keep 后 keep 字符
-mask_secret() {
-  local s="${1:-}" keep="${2:-4}"
-  local n=${#s}
-  if (( n <= keep * 2 )); then
-    echo "****"
-    return 0
-  fi
-  echo "${s:0:keep}…${s: -keep}"
+# ---------- 导入链接：终端默认隐藏，其余参数正常显示 ----------
+links_visible() {
+  [[ "${SHOW_LINKS}" == "1" || "${SHOW_LINKS}" == "true" || "${SHOW_LINKS}" == "yes" ]]
 }
 
-mask_uuid() {
-  local u="${1:-}"
-  # 8****-****-****-****-********abcd 风格
-  if [[ "$u" =~ ^([0-9a-fA-F]{8})-([0-9a-fA-F]{4})-([0-9a-fA-F]{4})-([0-9a-fA-F]{4})-([0-9a-fA-F]{12})$ ]]; then
-    echo "${BASH_REMATCH[1]}-****-****-****-********${BASH_REMATCH[5]: -4}"
-    return 0
-  fi
-  mask_secret "$u" 4
-}
-
-# 链接脱敏：只保留协议与 host:port 提示
 mask_link() {
   local link="${1:-}"
   if [[ "$link" =~ ^(vless|hysteria2|hy2)://([^@]+)@([^?/]+) ]]; then
-    echo "${BASH_REMATCH[1]}://***@${BASH_REMATCH[3]}/…(已隐藏，见本地文件)"
+    echo "${BASH_REMATCH[1]}://***@${BASH_REMATCH[3]}  ${C_DIM}(完整链接见文件)${C_RESET}"
     return 0
   fi
-  echo "(链接已隐藏)"
+  echo "${C_DIM}(完整链接见文件)${C_RESET}"
 }
 
-secrets_enabled() {
-  [[ "${SHOW_SECRETS}" == "1" || "${SHOW_SECRETS}" == "true" || "${SHOW_SECRETS}" == "yes" ]]
-}
-
-# 需要看明文时交互确认（录屏/截图场景可拒绝）
-maybe_reveal_secrets() {
-  if secrets_enabled; then
+maybe_show_links() {
+  if links_visible; then
     return 0
   fi
   echo
-  log_warn "终端默认不显示 UUID / 密码 / 完整导入链接（防截图泄露）"
-  if confirm "是否在本终端临时显示完整密钥？"; then
-    SHOW_SECRETS=1
-    log_ok "已临时开启明文显示（仅本次操作）"
-  else
-    log_tip "完整内容仅写入: ${SHARE_LINKS} （root 可读 chmod 600）"
+  log_tip "完整导入链接默认写入文件，终端不打印（防截图）"
+  if confirm "是否在本终端显示完整导入链接？"; then
+    SHOW_LINKS=1
   fi
 }
 
-emit_secret_line() {
-  # 标签 + 明文值：有权限则明文，否则脱敏
-  local label="$1" value="$2" kind="${3:-secret}"
-  if secrets_enabled; then
-    echo -e "  ${label} ${value}"
-  else
-    case "$kind" in
-      uuid) echo -e "  ${label} $(mask_uuid "$value")" ;;
-      link) echo -e "  ${label} $(mask_link "$value")" ;;
-      *)    echo -e "  ${label} $(mask_secret "$value")" ;;
-    esac
-  fi
+# 普通参数行（始终明文）
+emit_line() {
+  echo -e "  $1 $2"
 }
 
 emit_link_block() {
   local title="$1" link="$2"
   share_append_link "$title" "$link"
-  if secrets_enabled; then
+  if links_visible; then
     echo -e "  ${C_CYAN}${title}${C_RESET}"
     echo "  $link"
     echo
@@ -221,14 +186,12 @@ emit_link_block() {
   fi
 }
 
-# 将链接追加写入分享文件（chmod 600，勿提交到公开处）
 share_write_header() {
   mkdir -p "$SHARE_DIR"
   {
     echo "# VPS Proxy Manager v${SCRIPT_VERSION} · $(date '+%F %T %z')"
-    echo "# 敏感文件 · 权限 600 · 勿截图/勿发到公开频道"
-    echo "# 查看: sudo cat ${SHARE_LINKS}"
-    echo "# 复制到本地: scp root@服务器:${SHARE_LINKS} ."
+    echo "# 完整导入链接 · chmod 600 · 卸载协议时会清理"
+    echo "# sudo cat ${SHARE_LINKS}"
     echo
   } > "$SHARE_LINKS"
   chmod 600 "$SHARE_LINKS"
@@ -249,8 +212,70 @@ share_append_link() {
 share_flush_notice() {
   if [[ -f "$SHARE_LINKS" ]]; then
     chmod 600 "$SHARE_LINKS"
-    log_ok "链接: sudo cat ${SHARE_LINKS}"
+    log_ok "完整链接: sudo cat ${SHARE_LINKS}"
   fi
+}
+
+# 按当前已装协议重写分享文件；无协议则删除分享文件
+refresh_share_file() {
+  if ! any_protocol_installed; then
+    rm -rf "$SHARE_DIR"
+    return 0
+  fi
+  local old_show="${SHOW_LINKS}"
+  SHOW_LINKS=0
+  share_write_header
+  # 静默重建（不刷屏）
+  if is_reality_installed; then
+    local ip l
+    ip=$(get_public_ip)
+    l=$(build_vless_link "$ip")
+    share_append_link "REALITY" "$l"
+  fi
+  if is_ws_installed; then
+    local host l2 l3 ip4
+    host=$(state_get "XRAY_WS_HOST")
+    l2=$(build_ws_link "$host")
+    share_append_link "VLESS-WS-CF" "$l2"
+    ip4=$(get_public_ipv4 2>/dev/null || true)
+    l3=$(build_ws_link "${ip4:-$host}" "direct")
+    share_append_link "VLESS-WS-direct" "$l3"
+  fi
+  if is_hy2_installed; then
+    local ip l
+    ip=$(get_public_ip)
+    l=$(build_hy2_link "$ip")
+    share_append_link "Hysteria2" "${l%%#*}"
+  fi
+  SHOW_LINKS="$old_show"
+  chmod 600 "$SHARE_LINKS" 2>/dev/null || true
+}
+
+# 脚本产生的全部残留清理（无协议时 / 全清时）
+purge_all_script_artifacts() {
+  log_step "清理脚本产生的全部文件"
+  remove_hy2_port_hop 2>/dev/null || true
+  fw_remove_all_recorded 2>/dev/null || true
+  if svc_exists "$XRAY_SVC"; then
+    systemctl stop "$XRAY_SVC" 2>/dev/null || true
+    systemctl disable "$XRAY_SVC" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${XRAY_SVC}"
+  fi
+  if svc_exists "$HY2_SVC"; then
+    systemctl stop "$HY2_SVC" 2>/dev/null || true
+    systemctl disable "$HY2_SVC" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${HY2_SVC}"
+  fi
+  systemctl daemon-reload 2>/dev/null || true
+  rm -f "$XRAY_BIN" "$HY2_BIN"
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    rm -f "$SYSCTL_FILE"
+    sysctl --system >/dev/null 2>&1 || true
+  fi
+  rm -f /etc/apt/sources.list.d/vps-cloudflare-warp.list 2>/dev/null || true
+  # 整个沙盒：配置、日志、缓存、分享链接、证书等
+  rm -rf "$SANDBOX_ROOT"
+  log_ok "已清理 ${SANDBOX_ROOT}、二进制、systemd、sysctl、防火墙规则"
 }
 
 # 从终端读入（兼容 curl|bash / bash <(curl) 管道场景）
@@ -1563,31 +1588,37 @@ EOF
   done < "$SYSCTL_FILE"
 }
 
-# 全部协议卸完后清理 TG 加速残留
+# 全部协议卸完：清理 TG + 分享文件 + 缓存等脚本产物
 cleanup_tg_if_idle() {
   if any_protocol_installed; then
+    # 仍有协议：刷新分享文件（去掉已卸协议的链接）
+    refresh_share_file 2>/dev/null || true
     return 0
   fi
+  # 无任何协议：清掉脚本产生的全部残留
   uninstall_tg_accel
+  rm -rf "$SHARE_DIR" "$CACHE_DIR" "$LOG_DIR" 2>/dev/null || true
+  # 若沙盒已空则删除根目录
+  if [[ -d "$SANDBOX_ROOT" ]] && [[ -z "$(ls -A "$SANDBOX_ROOT" 2>/dev/null || true)" ]]; then
+    rmdir "$SANDBOX_ROOT" 2>/dev/null || true
+  fi
 }
 
 uninstall_tg_accel() {
-  # 只清本脚本写入的文件；不 purge 用户自装 WARP；清理旧版残留目录
   if [[ -f "$SYSCTL_FILE" ]]; then
     rm -f "$SYSCTL_FILE"
     sysctl --system >/dev/null 2>&1 || true
   fi
-  rm -rf "$OPT_DIR"
-  # 旧版 WARP 沙盒残留（我们不再安装，但全清时去掉）
-  if [[ -d "$WARP_DIR" ]]; then
-    rm -rf "$WARP_DIR"
-  fi
+  rm -rf "$OPT_DIR" "$WARP_DIR" "$SHARE_DIR"
   rm -f /etc/apt/sources.list.d/vps-cloudflare-warp.list 2>/dev/null || true
-  state_set "TG_ACCEL" "0"
-  state_set "OPT_INSTALLED" "0"
-  state_set "BBR_APPLIED" "0"
-  state_set "WARP_INSTALLED" "0"
-  state_set "WARP_SOCKS" ""
+  # state 可能已不存在
+  if [[ -f "$STATE_FILE" ]]; then
+    state_set "TG_ACCEL" "0"
+    state_set "OPT_INSTALLED" "0"
+    state_set "BBR_APPLIED" "0"
+    state_set "WARP_INSTALLED" "0"
+    state_set "WARP_SOCKS" ""
+  fi
 }
 
 install_reality() {
@@ -2204,7 +2235,7 @@ install_hysteria2() {
     if [[ -n "$obfs_pass" && "${obfs_pass,,}" != "n" && "${obfs_pass,,}" != "no" ]]; then
       obfs_on="1"
       state_set "HY2_OBFS" "$obfs_pass"
-      log_ok "已启用 Salamander obfs（密码已保存，终端不显示明文）"
+      log_ok "已启用 Salamander obfs"
     else
       state_set "HY2_OBFS" ""
     fi
@@ -2311,35 +2342,31 @@ install_all() {
 }
 
 uninstall_all() {
-  log_step "彻底一键清理所有组件与残留"
-  if ! confirm "确认删除 REALITY / VLESS-WS / Hy2 / TG加速 与沙盒目录？"; then
+  log_step "彻底清理所有协议与脚本文件"
+  if ! confirm "确认删除全部协议、配置、链接文件与沙盒？"; then
     log_info "已取消"
     return 0
   fi
-  uninstall_reality || true
-  uninstall_vless_ws || true
-  uninstall_hysteria2 || true
-  uninstall_tg_accel || true
-  fw_remove_all_recorded || true
-  rm -rf "$SANDBOX_ROOT"
-  rm -f "$XRAY_BIN" "$HY2_BIN"
-  rm -f "/etc/systemd/system/${XRAY_SVC}" "/etc/systemd/system/${HY2_SVC}"
-  systemctl daemon-reload 2>/dev/null || true
+  # 先尽量按模块卸（清防火墙端口等）
+  uninstall_reality 2>/dev/null || true
+  uninstall_vless_ws 2>/dev/null || true
+  uninstall_hysteria2 2>/dev/null || true
+  # 兜底：脚本产生的全部路径
+  purge_all_script_artifacts
   echo
-  log_step "卸载后环境自检"
   local dirty=0 p
   for p in "$XRAY_BIN" "$HY2_BIN" "$SANDBOX_ROOT" "$SYSCTL_FILE" \
            "/etc/systemd/system/${XRAY_SVC}" "/etc/systemd/system/${HY2_SVC}" \
-           "$OPT_DIR" "$WARP_DIR"; do
+           "$SHARE_DIR" "$SHARE_LINKS"; do
     if [[ -e "$p" ]]; then
       log_warn "仍存在: $p"
       dirty=1
     fi
   done
   if [[ $dirty -eq 0 ]]; then
-    log_ok "自检通过：协议与 TG 加速残留已清空"
+    log_ok "自检通过：脚本残留已清空"
   else
-    log_warn "存在残留项，可手动 rm（不影响系统包）"
+    log_warn "请手动检查残留路径"
   fi
 }
 
@@ -2474,12 +2501,11 @@ show_xray_link() {
   fi
   ui_section "REALITY-Vision"
   print_address_summary
-  echo -e "  端口     ${C_GREEN}$(state_get XRAY_PORT)${C_RESET}  ·  flow=xtls-rprx-vision"
-  emit_secret_line "UUID    " "$(state_get XRAY_UUID)" "uuid"
-  echo -e "  SNI      $(state_get XRAY_SNI)"
-  emit_secret_line "PBK     " "$(state_get XRAY_PUBKEY)" "secret"
-  emit_secret_line "SID     " "$(state_get XRAY_SHORTID)" "secret"
-  echo -e "  fp       chrome"
+  emit_line "端口    " "${C_GREEN}$(state_get XRAY_PORT)${C_RESET}  flow=xtls-rprx-vision"
+  emit_line "UUID    " "$(state_get XRAY_UUID)"
+  emit_line "SNI     " "$(state_get XRAY_SNI)"
+  emit_line "PBK     " "$(state_get XRAY_PUBKEY)"
+  emit_line "SID     " "$(state_get XRAY_SHORTID)  fp=chrome"
   hr
   emit_link_block "REALITY 导入链接" "$link_primary"
   if is_ipv6 "$ip6" && is_ipv4 "$ip4"; then
@@ -2502,23 +2528,22 @@ show_hy2_link() {
   fi
   ui_section "Hysteria 2"
   print_address_summary
-  echo -e "  主端口   ${C_GREEN}$(state_get HY2_PORT)/UDP${C_RESET}"
+  emit_line "主端口  " "${C_GREEN}$(state_get HY2_PORT)/UDP${C_RESET}"
   if [[ "$(state_get HY2_HOP)" == "1" ]]; then
-    echo -e "  端口跳跃 ${C_GREEN}$(state_get HY2_HOP_START)-$(state_get HY2_HOP_END)${C_RESET} → 主端口（抗 QoS）"
-    echo -e "  ${C_DIM}链接: 主端口 + mport=段（勿写成 ip:start-end）${C_RESET}"
+    emit_line "端口跳跃" "$(state_get HY2_HOP_START)-$(state_get HY2_HOP_END) → 主端口"
   else
-    echo -e "  端口跳跃 ${C_DIM}未启用${C_RESET}"
+    emit_line "端口跳跃" "未启用"
   fi
-  emit_secret_line "密码    " "$(state_get HY2_PASSWORD)" "secret"
+  emit_line "密码    " "$(state_get HY2_PASSWORD)"
   if [[ -n "$(state_get HY2_OBFS)" ]]; then
-    emit_secret_line "obfs    " "$(state_get HY2_OBFS)" "secret"
+    emit_line "obfs    " "salamander · $(state_get HY2_OBFS)"
   else
-    echo -e "  混淆     ${C_DIM}未启用${C_RESET}"
+    emit_line "混淆    " "未启用"
   fi
-  echo -e "  SNI      www.apple.com  ·  insecure=1"
+  emit_line "SNI     " "www.apple.com · insecure=1"
   local _tier _bw
   _tier=$(state_get "HY2_TIER"); _bw=$(state_get "HY2_BW")
-  [[ -n "$_tier" ]] && echo -e "  档位     ${_tier} · ${_bw:-auto}"
+  [[ -n "$_tier" ]] && emit_line "档位    " "${_tier} · ${_bw:-auto}"
   hr
   emit_link_block "Hysteria2 导入链接" "${link_primary%%#*}"
   if is_ipv6 "$ip6" && is_ipv4 "$ip4"; then
@@ -2542,13 +2567,13 @@ show_ws_link() {
   ui_section "VLESS + WebSocket (CF Full)"
   tip4=$(get_public_ipv4 2>/dev/null || true)
   tip6=$(get_public_ipv6 2>/dev/null || true)
-  emit_secret_line "UUID    " "$uuid" "uuid"
-  echo -e "  源站     ${C_GREEN}https :${port}${C_RESET}${path}"
-  echo -e "  Host/SNI ${C_GREEN}${host}${C_RESET}"
-  echo -e "  客户端   域名或优选 IP · 443 · TLS · 无 flow"
-  echo -e "  CF SSL   ${C_YELLOW}${C_BOLD}Full${C_RESET} · 橙云 · 安全组 ${port}/tcp"
-  [[ -n "$tip4" ]] && echo -e "  ${C_DIM}DNS A    → ${tip4}${C_RESET}"
-  [[ -n "$tip6" ]] && echo -e "  ${C_DIM}DNS AAAA → ${tip6}${C_RESET}"
+  emit_line "UUID    " "$uuid"
+  emit_line "源站    " "https :${port}${path}"
+  emit_line "Host/SNI" "$host"
+  emit_line "客户端  " "域名或优选IP · 443 · TLS · 无 flow"
+  emit_line "CF SSL  " "Full · 橙云 · 安全组 ${port}/tcp"
+  [[ -n "$tip4" ]] && emit_line "DNS A   " "$tip4"
+  [[ -n "$tip6" ]] && emit_line "DNS AAAA" "$tip6"
   hr
   emit_link_block "VLESS-WS-CF" "$link_cf"
   emit_link_block "VLESS-WS-direct(调试)" "$link_direct"
@@ -2560,23 +2585,20 @@ show_all_links() {
   is_ws_installed && any=1
   is_hy2_installed && any=1
   if [[ $any -eq 0 ]]; then
-    ui_section "节点信息"
+    ui_section "节点"
     log_warn "尚未安装任何协议"
-    log_tip "主菜单选 [1] 安装"
     return 0
   fi
-  # 非 SHOW_SECRETS=1 时询问是否明文（默认否）
   if [[ "${1:-}" != "quiet" ]]; then
-    maybe_reveal_secrets
+    maybe_show_links
   fi
   share_write_header
   show_xray_link
   show_ws_link
   show_hy2_link
   share_flush_notice
-  if ! secrets_enabled; then
-    echo
-    log_tip "需要明文: SHOW_SECRETS=1 sudo bash $0 --links   或菜单 [3] 时选 y"
+  if ! links_visible; then
+    log_tip "显示完整链接: 菜单[3]选 y  或  SHOW_LINKS=1 sudo $0 --links"
   fi
 }
 
@@ -2721,7 +2743,7 @@ menu_install() {
     esac
   done
   log_ok "安装: ${names}"
-  SHOW_SECRETS=0
+  SHOW_LINKS=0
   share_write_header
   t0=$(date +%s)
   for p in $picks; do
@@ -2732,7 +2754,7 @@ menu_install() {
     esac
   done
   echo
-  log_ok "完成 $(( $(date +%s) - t0 ))s · 链接: cat ${SHARE_LINKS}"
+  log_ok "完成 $(( $(date +%s) - t0 ))s"
   share_flush_notice
 }
 
@@ -2784,10 +2806,18 @@ menu_uninstall() {
     esac
   done
   if ! any_protocol_installed; then
+    # 无协议：清理脚本产生的全部文件（含 client-links.txt、缓存、sysctl…）
     uninstall_tg_accel || true
-    log_ok "已全部卸载，TG 加速已清理"
+    rm -rf "$SHARE_DIR" "$CACHE_DIR" "$LOG_DIR" 2>/dev/null || true
+    # 空沙盒则删根
+    if [[ -d "$SANDBOX_ROOT" ]]; then
+      # 若只剩空目录或 state，一并清
+      rm -rf "$SANDBOX_ROOT"
+    fi
+    log_ok "已全部卸载，脚本文件已清理（含 ${SHARE_LINKS}）"
   else
-    log_ok "卸载完成"
+    refresh_share_file 2>/dev/null || true
+    log_ok "卸载完成 · 已更新分享文件"
   fi
 }
 
@@ -2846,11 +2876,12 @@ usage() {
   --diagnose       连通诊断（无密钥）
   --links          导出链接到文件（终端默认脱敏）
   --show-secrets   与 --links 联用：终端打印完整密钥
-  SHOW_SECRETS=1   环境变量：允许终端明文
+  SHOW_LINKS=1     终端打印完整导入链接
 
 隐私:
-  完整导入链接仅写入 ${SHARE_LINKS} (chmod 600)
-  请勿把该文件内容发到公开群/截图
+  UUID/密码/端口/path 等正常显示
+  完整导入链接默认隐藏，写入 ${SHARE_LINKS} (600)
+  卸载协议时更新/删除该文件；无协议时清理脚本全部产物
 
 一行安装:
   curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash
@@ -2872,7 +2903,7 @@ main() {
     case "$a" in
       -h|--help) usage; exit 0 ;;
       -v|--version) echo "proxy_manager.sh ${SCRIPT_VERSION}"; exit 0 ;;
-      --show-secrets) SHOW_SECRETS=1 ;;
+      --show-links|--show-secrets) SHOW_LINKS=1 ;;
       --links) do_links=1 ;;
       --status) do_status=1 ;;
       --diagnose) do_diag=1 ;;
@@ -2900,16 +2931,10 @@ main() {
     exit 0
   fi
   if [[ $do_links -eq 1 ]]; then
-    # 默认脱敏；加 --show-secrets 才终端明文
-    if secrets_enabled; then
-      show_all_links
-    else
-      show_all_links quiet
-    fi
+    if links_visible; then show_all_links; else show_all_links quiet; fi
     exit 0
   fi
 
-  # 无参数：交互菜单（安装时强制脱敏，看节点时再询问）
   preflight || true
   main_loop
 }
