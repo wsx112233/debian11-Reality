@@ -2828,19 +2828,16 @@ usage() {
   cat <<EOF
 用法: sudo $0 [选项]
 
-  (无参数)          交互菜单
-  -h, --help       帮助
-  -v               版本
-  --status         组件状态（无密钥）
-  --diagnose       连通诊断（无密钥）
-  --links          导出链接到文件（终端默认脱敏）
-  --show-secrets   与 --links 联用：终端打印完整密钥
-  SHOW_LINKS=1     终端打印完整导入链接
+  (无参数)     交互菜单
+  -h, --help  帮助
+  -v          版本
+  --status    组件状态
+  --diagnose  连通诊断
+  --links     打印完整节点链接与二维码，并写入文件
 
-隐私:
-  UUID/密码/端口/path 等正常显示
-  完整导入链接默认隐藏，写入 ${SHARE_LINKS} (600)
-  卸载协议时更新/删除该文件；无协议时清理脚本全部产物
+节点链接会打印在终端（含二维码），并保存到:
+  ${SHARE_LINKS} (chmod 600)
+卸载全部协议时清理脚本产生的文件
 
 一行安装:
   curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash
