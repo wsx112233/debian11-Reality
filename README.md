@@ -4,7 +4,7 @@
 
 单文件脚本：安装 / 管理 / 干净卸载 **REALITY** · **Hysteria2** · **VLESS+WS（Cloudflare）**。
 
-## 一行安装
+## 安装
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash
