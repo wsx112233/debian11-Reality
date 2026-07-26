@@ -45,17 +45,19 @@ curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get
 ```bash
 sudo bash proxy_manager.sh --status
 sudo bash proxy_manager.sh --diagnose
-sudo bash proxy_manager.sh --links              # 导出到文件，终端脱敏
-SHOW_SECRETS=1 sudo bash proxy_manager.sh --links --show-secrets  # 终端明文（慎用）
+sudo bash proxy_manager.sh --links
+SHOW_LINKS=1 sudo bash proxy_manager.sh --links --show-links
 ```
 
 ## 隐私
 
-- 终端**默认不显示** UUID / 密码 / PBK / 完整导入链接 / 二维码明文
-- 完整内容写入：`/etc/vps_proxy_mgr/share/client-links.txt`（`chmod 600`）
+- **正常显示**：UUID、密码、端口、path、PBK、SNI 等
+- **默认隐藏**：完整导入链接（`vless://` / `hysteria2://`）
+- 完整链接写入：`/etc/vps_proxy_mgr/share/client-links.txt`（`chmod 600`）
 - 查看：`sudo cat /etc/vps_proxy_mgr/share/client-links.txt`
-- 菜单 [3] 可选择是否临时在终端显示明文
+- **卸载全部协议**时删除该文件及脚本产生的其它文件（沙盒/二进制/sysctl/unit）
 
 ## License
 
 MIT
+
