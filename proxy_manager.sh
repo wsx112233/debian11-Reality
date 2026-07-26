@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.8.5"
+readonly SCRIPT_VERSION="1.8.6"
 # Cloudflare 橙云 HTTPS 回源端口（本脚本 VLESS+WS 固定 SSL=Full，源站必须 TLS）
 # https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # 优先 8443（443 常被宝塔/nginx 占用）
@@ -37,6 +37,9 @@ readonly SYSCTL_FILE="/etc/sysctl.d/99-vps-proxy-mgr.conf"
 
 readonly XRAY_GITHUB_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly HY2_GITHUB_API="https://api.github.com/repos/apernet/hysteria/releases/latest"
+# 下载失败时按序尝试的已知可用 tag（勿用会污染日志的假版本）
+readonly XRAY_FALLBACK_TAGS=("v25.12.8" "v25.9.11" "v25.6.8" "v25.3.6" "v1.8.24")
+readonly HY2_FALLBACK_TAGS=("app/v2.6.1" "app/v2.5.0")
 
 readonly SNI_POOL=(
   "www.apple.com"
@@ -1108,41 +1111,70 @@ _dl_looks_valid() {
   sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
   (( sz >= min_bytes )) || return 1
   # 排除明显 HTML/JSON 错误页
-  if head -c 200 "$f" 2>/dev/null | grep -qiE '<!DOCTYPE|<html|Not Found|"message"'; then
+  if head -c 200 "$f" 2>/dev/null | grep -qiE '<!DOCTYPE|<html|Not Found|"message"|AccessDenied|Error'; then
     return 1
   fi
   return 0
 }
 
-# 规范化 release tag（只允许安全字符，防止日志/缓存污染）
+# 规范化 release tag（整串优先；禁止从污染文本里抠出假版本如 v3.27）
 sanitize_release_tag() {
-  local t="${1:-}"
-  # 去掉日志混入的控制字符与多余空白
-  t=$(printf '%s' "$t" | tr -d '\r\n\t' | sed -E 's/.*((app\/)?v?[0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/' 2>/dev/null || true)
-  if [[ "$t" =~ ^(app/)?v?[0-9]+\.[0-9]+(\.[0-9]+)?([.-][A-Za-z0-9._-]+)?$ ]]; then
+  local raw t
+  raw=$(printf '%s' "${1:-}" | tr -d '\r\n\t' | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')
+  [[ -n "$raw" ]] || return 1
+  # 1) 整串已是合法 tag
+  if [[ "$raw" =~ ^(app/)?v[0-9]+\.[0-9]+(\.[0-9]+)?([.-][A-Za-z0-9._-]+)?$ ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  # 2) 仅允许从干净 JSON/空白旁提取「完整」tag，优先三段式 vX.Y.Z
+  t=$(printf '%s' "$raw" | grep -oE 'app/v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+  if [[ -z "$t" ]]; then
+    t=$(printf '%s' "$raw" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+  fi
+  if [[ -z "$t" ]]; then
+    t=$(printf '%s' "$raw" | grep -oE 'app/v[0-9]+\.[0-9]+' | head -1 || true)
+  fi
+  if [[ -n "$t" && "$t" =~ ^(app/)?v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
     printf '%s\n' "$t"
     return 0
   fi
   return 1
 }
 
+# Xray tag：v1.x.x 或日历版 v2Y.M.D（拒绝 v3.27 这类污染）
+is_xray_release_tag() {
+  local t="$1"
+  [[ "$t" =~ ^v1\.[0-9]+\.[0-9]+$ ]] && return 0
+  # 2024–2099 日历版本：v24.x.x … v99.x.x
+  [[ "$t" =~ ^v(2[4-9]|[3-9][0-9])\.[0-9]{1,2}\.[0-9]{1,2}$ ]] && return 0
+  return 1
+}
+
+# Hy2 tag：app/vX.Y.Z
+is_hy2_release_tag() {
+  local t="$1"
+  [[ "$t" =~ ^app/v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+}
+
 download() {
   local url="$1" dest="$2" min_bytes="${3:-1000}" quiet="${4:-0}"
-  local host
+  local host code
   host=$(echo "$url" | sed -E 's|https?://([^/]+).*|\1|')
   [[ "$quiet" != "1" ]] && log_info "拉取 ${url##*/} ← ${host}"
   rm -f "$dest" 2>/dev/null || true
-  if curl -fL --retry 2 --retry-delay 1 --retry-all-errors \
+  # 写出 HTTP 状态，区分 404（版本不存在）与网络失败
+  code=$(curl -L --retry 1 --retry-delay 1 \
       --connect-timeout "$DL_CONNECT_TIMEOUT" \
       --max-time "$DL_MAX_TIME" \
-      --speed-time 20 --speed-limit 512 \
+      --speed-time 25 --speed-limit 256 \
       -A "Mozilla/5.0 (compatible; vps-proxy-mgr/${SCRIPT_VERSION})" \
-      -o "$dest" "$url" 2>/dev/null; then
-    if _dl_looks_valid "$dest" "$min_bytes"; then
-      return 0
-    fi
+      -o "$dest" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+  if [[ "$code" == "200" || "$code" == "206" ]] && _dl_looks_valid "$dest" "$min_bytes"; then
+    return 0
   fi
-  if command -v wget &>/dev/null; then
+  # 部分镜像 302 后 curl 仍写 200；非 404 再试 wget
+  if [[ "$code" != "404" && "$code" != "410" ]] && command -v wget &>/dev/null; then
     rm -f "$dest" 2>/dev/null || true
     if wget -q --tries=2 --timeout="$DL_CONNECT_TIMEOUT" \
         -U "Mozilla/5.0" -O "$dest" "$url" 2>/dev/null \
@@ -1151,54 +1183,78 @@ download() {
     fi
   fi
   rm -f "$dest" 2>/dev/null || true
+  if [[ "$code" == "404" || "$code" == "410" ]]; then
+    return 2
+  fi
   return 1
 }
 
-# 精简镜像列表（少而稳，避免刷几十次失败日志）
+# 官方 URL + 国内常用加速（少而稳；失效镜像会被快速跳过）
 github_release_urls() {
   local repo="$1" tag="$2" file="$3"
   local gh="https://github.com/${repo}/releases/download/${tag}/${file}"
   printf '%s\n' \
+    "$gh" \
     "https://ghproxy.net/${gh}" \
     "https://gh-proxy.com/${gh}" \
     "https://mirror.ghproxy.com/${gh}" \
     "https://ghfast.top/${gh}" \
     "https://github.moeyy.xyz/${gh}" \
     "https://gh.ddlc.top/${gh}" \
-    "$gh"
+    "https://gh.llkk.cc/${gh}" \
+    "https://gitdl.cn/${gh}"
 }
 
 github_mirrors() {
   local url="$1"
   printf '%s\n' \
+    "$url" \
     "https://ghproxy.net/${url}" \
     "https://gh-proxy.com/${url}" \
-    "https://mirror.ghproxy.com/${url}" \
     "https://ghfast.top/${url}" \
-    "https://github.moeyy.xyz/${url}" \
-    "$url"
+    "https://github.moeyy.xyz/${url}"
 }
 
 # 带缓存的 GitHub latest tag（stdout 仅输出 tag）
+# $4=kind：xray|hy2|any — 按生态校验 tag，避免缓存/HTML 污染
 github_latest_tag() {
-  local api="$1" cache_key="$2" fallback="$3"
-  local ver mirror clean
+  local api="$1" cache_key="$2" fallback="$3" kind="${4:-any}"
+  local ver mirror clean body
+
+  _tag_ok() {
+    local x="$1"
+    case "$kind" in
+      xray) is_xray_release_tag "$x" ;;
+      hy2)  is_hy2_release_tag "$x" ;;
+      *)    sanitize_release_tag "$x" >/dev/null ;;
+    esac
+  }
+
   ver=$(cache_get "$cache_key" "$VER_CACHE_TTL" 2>/dev/null || true)
-  if clean=$(sanitize_release_tag "$ver"); then
+  if clean=$(sanitize_release_tag "$ver") && _tag_ok "$clean"; then
     printf '%s\n' "$clean"
     return 0
   fi
   # 缓存污染则删除
   rm -f "${CACHE_DIR}/${cache_key}" 2>/dev/null || true
-  ver=""
+
   for mirror in \
     "$api" \
     "https://ghproxy.net/${api}" \
+    "https://gh-proxy.com/${api}" \
     "https://ghfast.top/${api}" \
     "https://github.moeyy.xyz/${api}"; do
-    ver=$(curl -fsSL --connect-timeout 8 --max-time 15 "$mirror" 2>/dev/null \
-      | jq -r '.tag_name // empty' 2>/dev/null || true)
-    if clean=$(sanitize_release_tag "$ver"); then
+    body=$(curl -fsSL --connect-timeout 8 --max-time 15 \
+      -A "Mozilla/5.0 (compatible; vps-proxy-mgr/${SCRIPT_VERSION})" \
+      -H "Accept: application/vnd.github+json" \
+      "$mirror" 2>/dev/null || true)
+    ver=$(printf '%s' "$body" | jq -r '.tag_name // empty' 2>/dev/null || true)
+    if [[ -z "$ver" ]]; then
+      # 无 jq 或非 JSON：从文本抠 tag_name
+      ver=$(printf '%s' "$body" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/' || true)
+    fi
+    if clean=$(sanitize_release_tag "$ver") && _tag_ok "$clean"; then
       cache_set "$cache_key" "$clean"
       printf '%s\n' "$clean"
       return 0
@@ -1208,23 +1264,63 @@ github_latest_tag() {
   printf '%s\n' "$fallback"
 }
 
-# 通用：按 URL 列表下载（去重、安静失败）
+# 通用：按 URL 列表下载（去重；同版本连续 404 则提前放弃该版本）
+# 返回 0 成功；1 网络/镜像失败；2 资源不存在（tag 很可能错误）
 download_from_list() {
   local dest="$1" min_bytes="${2:-1000}"
   shift 2
-  local m n=0 seen="|"
+  local m n=0 seen="|" rc not_found=0
   for m in "$@"; do
     [[ -z "$m" ]] && continue
     [[ "$m" == *cdn.jsdelivr.net* ]] && continue
     [[ "$seen" == *"|${m}|"* ]] && continue
     seen+="${m}|"
     n=$((n + 1))
-    if download "$m" "$dest" "$min_bytes"; then
+    rc=0
+    download "$m" "$dest" "$min_bytes" || rc=$?
+    if [[ $rc -eq 0 ]]; then
       log_ok "下载完成"
       return 0
     fi
-    # 只提示失败序号，不刷完整 URL
-    log_warn "镜像 #${n} 失败"
+    if [[ $rc -eq 2 ]]; then
+      not_found=$((not_found + 1))
+      log_warn "镜像 #${n} 404"
+      # 官方 + 任意镜像均 404 → tag 不存在，别再扫完列表
+      if [[ $not_found -ge 2 ]]; then
+        log_warn "该版本资源不存在，跳过剩余镜像"
+        return 2
+      fi
+    else
+      log_warn "镜像 #${n} 失败"
+    fi
+  done
+  [[ $not_found -gt 0 && $not_found -eq $n ]] && return 2
+  return 1
+}
+
+# 按 tag 列表依次下载 GitHub release 资产
+# download_github_release dest min_bytes repo asset tag1 [tag2...]
+download_github_release() {
+  local dest="$1" min_bytes="$2" repo="$3" asset="$4"
+  shift 4
+  local tag rc
+  local -a urls=()
+  for tag in "$@"; do
+    [[ -n "$tag" ]] || continue
+    log_info "版本 ${tag}"
+    mapfile -t urls < <(github_release_urls "$repo" "$tag" "$asset")
+    rc=0
+    download_from_list "$dest" "$min_bytes" "${urls[@]}" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+      # stdout 回传实际用的 tag（调用方用 ver=$(...) 时注意日志在 stderr）
+      printf '%s\n' "$tag" > "${dest}.tag"
+      return 0
+    fi
+    if [[ $rc -eq 2 ]]; then
+      log_warn "跳过无效版本 ${tag}"
+    else
+      log_warn "版本 ${tag} 全部镜像失败，试下一个"
+    fi
   done
   return 1
 }
@@ -1239,7 +1335,7 @@ install_xray_binary() {
   fi
 
   local arch asset_name tmp ver clean
-  local -a urls=()
+  local -a try_tags=()
   arch=$(detect_arch)
   case "$arch" in
     amd64) asset_name="Xray-linux-64.zip" ;;
@@ -1247,38 +1343,30 @@ install_xray_binary() {
   esac
 
   log_step "下载 Xray-core"
-  # 清除可能被污染的版本缓存
+  # 清除可能被污染的版本缓存（历史日志曾把 v3.27 写进缓存）
   rm -f "${CACHE_DIR}/xray_ver" 2>/dev/null || true
-  ver=$(github_latest_tag "$XRAY_GITHUB_API" "xray_ver" "v25.12.8")
+  ver=$(github_latest_tag "$XRAY_GITHUB_API" "xray_ver" "${XRAY_FALLBACK_TAGS[0]}" "xray")
   clean=$(sanitize_release_tag "$ver" || true)
-  if [[ -z "$clean" ]]; then
-    ver="v25.12.8"
-  else
+  if [[ -n "$clean" ]] && is_xray_release_tag "$clean"; then
     ver="$clean"
+  else
+    ver="${XRAY_FALLBACK_TAGS[0]}"
   fi
-  [[ "$ver" == v* || "$ver" == app/* ]] || ver="v${ver}"
-  log_info "版本 ${ver}"
-
-  mapfile -t urls < <(github_release_urls "XTLS/Xray-core" "$ver" "$asset_name")
+  try_tags=("$ver")
+  local t
+  for t in "${XRAY_FALLBACK_TAGS[@]}"; do
+    [[ "$t" == "$ver" ]] && continue
+    try_tags+=("$t")
+  done
 
   tmp=$(mktemp -d)
-  if ! download_from_list "${tmp}/xray.zip" 500000 "${urls[@]}"; then
-    local alt
-    for alt in "v25.3.6" "v1.8.24"; do
-      log_warn "尝试备用版本 ${alt}"
-      mapfile -t urls < <(github_release_urls "XTLS/Xray-core" "$alt" "$asset_name")
-      if download_from_list "${tmp}/xray.zip" 500000 "${urls[@]}"; then
-        ver="$alt"
-        break
-      fi
-    done
-    if [[ ! -s "${tmp}/xray.zip" ]]; then
-      rm -rf "$tmp"
-      log_err "Xray 下载失败"
-      log_tip "手动: 下载 ${asset_name} → 解压后 install -m 755 xray ${XRAY_BIN}"
-      die "请检查网络后重试"
-    fi
+  if ! download_github_release "${tmp}/xray.zip" 500000 "XTLS/Xray-core" "$asset_name" "${try_tags[@]}"; then
+    rm -rf "$tmp"
+    log_err "Xray 下载失败"
+    log_tip "手动: 下载 ${asset_name} → 解压后 install -m 755 xray ${XRAY_BIN}"
+    die "请检查网络后重试"
   fi
+  [[ -f "${tmp}/xray.zip.tag" ]] && ver=$(cat "${tmp}/xray.zip.tag")
 
   unzip -qo "${tmp}/xray.zip" -d "${tmp}/out" 2>/dev/null || true
   local found="${tmp}/out/xray"
@@ -1765,7 +1853,7 @@ install_hy2_binary() {
   fi
 
   local arch asset_name tmp ver clean
-  local -a urls=()
+  local -a try_tags=()
   arch=$(detect_arch)
   case "$arch" in
     amd64) asset_name="hysteria-linux-amd64" ;;
@@ -1774,25 +1862,30 @@ install_hy2_binary() {
 
   log_step "下载 Hysteria2"
   rm -f "${CACHE_DIR}/hy2_ver" 2>/dev/null || true
-  ver=$(github_latest_tag "$HY2_GITHUB_API" "hy2_ver" "app/v2.6.1")
+  ver=$(github_latest_tag "$HY2_GITHUB_API" "hy2_ver" "${HY2_FALLBACK_TAGS[0]}" "hy2")
   clean=$(sanitize_release_tag "$ver" || true)
-  [[ -n "$clean" ]] && ver="$clean"
-  # Hy2 tag 通常为 app/vX.Y.Z
+  if [[ -n "$clean" ]]; then
+    ver="$clean"
+  fi
   if [[ "$ver" != app/* ]]; then
     [[ "$ver" == v* ]] && ver="app/${ver}" || ver="app/v${ver}"
   fi
-  log_info "版本 ${ver}"
-  mapfile -t urls < <(github_release_urls "apernet/hysteria" "$ver" "$asset_name")
+  if ! is_hy2_release_tag "$ver"; then
+    ver="${HY2_FALLBACK_TAGS[0]}"
+  fi
+  try_tags=("$ver")
+  local t
+  for t in "${HY2_FALLBACK_TAGS[@]}"; do
+    [[ "$t" == "$ver" ]] && continue
+    try_tags+=("$t")
+  done
 
   tmp=$(mktemp -d)
-  if ! download_from_list "${tmp}/hy2" 2000000 "${urls[@]}"; then
-    mapfile -t urls < <(github_release_urls "apernet/hysteria" "app/v2.6.1" "$asset_name")
-    if ! download_from_list "${tmp}/hy2" 2000000 "${urls[@]}"; then
-      rm -rf "$tmp"
-      log_err "Hysteria2 下载失败"
-      log_tip "手动下载 ${asset_name} → ${HY2_BIN}"
-      die "请检查网络后重试"
-    fi
+  if ! download_github_release "${tmp}/hy2" 2000000 "apernet/hysteria" "$asset_name" "${try_tags[@]}"; then
+    rm -rf "$tmp"
+    log_err "Hysteria2 下载失败"
+    log_tip "手动下载 ${asset_name} → ${HY2_BIN}"
+    die "请检查网络后重试"
   fi
   install -m 755 "${tmp}/hy2" "$HY2_BIN"
   rm -rf "$tmp"
