@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.8.1"
-# 完整导入链接默认不打印到终端（防截图）；UUID/端口/path 等正常显示
-# 链接明文：菜单确认 / SHOW_LINKS=1 / --show-links
-SHOW_LINKS="${SHOW_LINKS:-0}"
+readonly SCRIPT_VERSION="1.8.2"
 # Cloudflare 橙云 HTTPS 回源端口（本脚本 VLESS+WS 固定 SSL=Full，源站必须 TLS）
 # https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # 优先 8443（443 常被宝塔/nginx 占用）
@@ -143,47 +140,20 @@ preflight() {
   return 0
 }
 
-# ---------- 导入链接：终端默认隐藏，其余参数正常显示 ----------
-links_visible() {
-  [[ "${SHOW_LINKS}" == "1" || "${SHOW_LINKS}" == "true" || "${SHOW_LINKS}" == "yes" ]]
-}
-
-mask_link() {
-  local link="${1:-}"
-  if [[ "$link" =~ ^(vless|hysteria2|hy2)://([^@]+)@([^?/]+) ]]; then
-    echo "${BASH_REMATCH[1]}://***@${BASH_REMATCH[3]}  ${C_DIM}(完整链接见文件)${C_RESET}"
-    return 0
-  fi
-  echo "${C_DIM}(完整链接见文件)${C_RESET}"
-}
-
-maybe_show_links() {
-  if links_visible; then
-    return 0
-  fi
-  echo
-  log_tip "完整导入链接默认写入文件，终端不打印（防截图）"
-  if confirm "是否在本终端显示完整导入链接？"; then
-    SHOW_LINKS=1
-  fi
-}
-
-# 普通参数行（始终明文）
+# 普通参数行
 emit_line() {
   echo -e "  $1 $2"
 }
 
+# 打印完整导入链接 + 二维码，并写入分享文件
 emit_link_block() {
   local title="$1" link="$2"
   share_append_link "$title" "$link"
-  if links_visible; then
-    echo -e "  ${C_CYAN}${title}${C_RESET}"
-    echo "  $link"
-    echo
-    print_qr "$link" "$title"
-  else
-    echo -e "  ${C_CYAN}${title}${C_RESET}  $(mask_link "$link")"
-  fi
+  echo -e "  ${C_CYAN}${title}${C_RESET}"
+  echo "  $link"
+  echo
+  print_qr "$link" "$title"
+  echo
 }
 
 share_write_header() {
@@ -212,7 +182,7 @@ share_append_link() {
 share_flush_notice() {
   if [[ -f "$SHARE_LINKS" ]]; then
     chmod 600 "$SHARE_LINKS"
-    log_ok "完整链接: sudo cat ${SHARE_LINKS}"
+    log_ok "已同步: ${SHARE_LINKS}"
   fi
 }
 
@@ -222,10 +192,7 @@ refresh_share_file() {
     rm -rf "$SHARE_DIR"
     return 0
   fi
-  local old_show="${SHOW_LINKS}"
-  SHOW_LINKS=0
   share_write_header
-  # 静默重建（不刷屏）
   if is_reality_installed; then
     local ip l
     ip=$(get_public_ip)
@@ -247,7 +214,6 @@ refresh_share_file() {
     l=$(build_hy2_link "$ip")
     share_append_link "Hysteria2" "${l%%#*}"
   fi
-  SHOW_LINKS="$old_show"
   chmod 600 "$SHARE_LINKS" 2>/dev/null || true
 }
 
@@ -2589,17 +2555,11 @@ show_all_links() {
     log_warn "尚未安装任何协议"
     return 0
   fi
-  if [[ "${1:-}" != "quiet" ]]; then
-    maybe_show_links
-  fi
   share_write_header
   show_xray_link
   show_ws_link
   show_hy2_link
   share_flush_notice
-  if ! links_visible; then
-    log_tip "显示完整链接: 菜单[3]选 y  或  SHOW_LINKS=1 sudo $0 --links"
-  fi
 }
 
 # 一键诊断：本机监听 / 服务 / 常见 CF 坑提示
@@ -2743,7 +2703,6 @@ menu_install() {
     esac
   done
   log_ok "安装: ${names}"
-  SHOW_LINKS=0
   share_write_header
   t0=$(date +%s)
   for p in $picks; do
@@ -2903,8 +2862,7 @@ main() {
     case "$a" in
       -h|--help) usage; exit 0 ;;
       -v|--version) echo "proxy_manager.sh ${SCRIPT_VERSION}"; exit 0 ;;
-      --show-links|--show-secrets) SHOW_LINKS=1 ;;
-      --links) do_links=1 ;;
+          --links) do_links=1 ;;
       --status) do_status=1 ;;
       --diagnose) do_diag=1 ;;
       "") ;;
@@ -2931,7 +2889,7 @@ main() {
     exit 0
   fi
   if [[ $do_links -eq 1 ]]; then
-    if links_visible; then show_all_links; else show_all_links quiet; fi
+    show_all_links
     exit 0
   fi
 
