@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.8.3"
+readonly SCRIPT_VERSION="1.8.4"
 # Cloudflare 橙云 HTTPS 回源端口（本脚本 VLESS+WS 固定 SSL=Full，源站必须 TLS）
 # https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # 优先 8443（443 常被宝塔/nginx 占用）
@@ -1720,6 +1720,9 @@ install_vless_ws() {
   echo
   log_ok "VLESS+WS 完成  :${port}${path}  ${host}"
   log_tip "CF: 橙云 + SSL=Full + 放行 TCP ${port}（含 IPv6）"
+  if [[ "$port" != "443" ]]; then
+    log_tip "客户端端口填 ${port}（与源站相同）。填 443 会 521，除非建 Origin Rule→${port}"
+  fi
   show_ws_link
 }
 
@@ -2417,7 +2420,8 @@ build_hy2_link() {
 
 # VLESS+WS 链接：地址可用 CF 优选 IP；Host/SNI 用域名
 # $1=连接地址(可优选IP)  缺省用域名 Host
-# $2=direct → 源站直连（TLS 自签 + allowInsecure）；否则走 CF 443
+# $2=direct → 源站直连（TLS 自签 + allowInsecure）
+# 否则走 CF：客户端端口必须与源站端口相同（CF 同端口回源；源站 8443 时客户端不能写 443，否则 521）
 build_ws_link() {
   local addr host_hdr path port uuid name enc_path enc_host
   addr="${1:-}"
@@ -2426,8 +2430,9 @@ build_ws_link() {
   port=$(state_get "XRAY_WS_PORT")
   uuid=$(state_get "XRAY_UUID")
   [[ -z "$addr" ]] && addr="$host_hdr"
-  # CF：地址=域名/优选IP · 443 · TLS(正式证) · sni/host=域名
-  # 直连：地址=服务器IP · 源站端口 · TLS(自签) · allowInsecure=1 · sni/host=域名
+  # CF：地址=域名/优选IP · 端口=源站端口 · TLS(CF 正式证) · sni/host=域名
+  # 直连：地址=服务器IP · 源站端口 · TLS(自签) · allowInsecure=1
+  # 若坚持客户端 443、源站 8443：须在 CF 建 Origin Rule 改写目标端口 → 8443
   enc_path=$(urlencode "$path")
   enc_host=$(urlencode "$host_hdr")
   name=$(urlencode "VLESS-WS-CF")
@@ -2440,7 +2445,8 @@ build_ws_link() {
   else
     local h
     h=$(format_host_for_uri "$addr")
-    echo "vless://${uuid}@${h}:443?encryption=none&security=tls&type=ws&host=${enc_host}&path=${enc_path}&sni=${enc_host}&fp=chrome#${name}"
+    # 与源站同端口，避免 CF 默认回源 443 导致 521
+    echo "vless://${uuid}@${h}:${port}?encryption=none&security=tls&type=ws&host=${enc_host}&path=${enc_path}&sni=${enc_host}&fp=chrome#${name}"
   fi
 }
 
@@ -2537,9 +2543,12 @@ show_ws_link() {
   emit_line "UUID    " "$uuid"
   emit_line "源站    " "https :${port}${path}"
   emit_line "Host/SNI" "$host"
-  emit_line "客户端  " "域名/优选IP · 443 · TLS · 无 flow"
+  emit_line "客户端  " "域名/优选IP · ${port} · TLS · 无 flow（与源站同端口）"
   emit_line "直连调试" "IP:${port} · TLS · allowInsecure · 无 flow"
   emit_line "CF SSL  " "Full · 橙云 · 安全组 ${port}/tcp"
+  if [[ "$port" != "443" ]]; then
+    emit_line "注意    " "勿写客户端 443（会 521）；要用 443 请建 Origin Rule→${port}"
+  fi
   [[ -n "$tip4" ]] && emit_line "DNS A   " "$tip4"
   [[ -n "$tip6" ]] && emit_line "DNS AAAA" "$tip6"
   hr
@@ -2595,6 +2604,9 @@ run_diagnose() {
       log_warn "本机 WS HTTP ${code}"
     fi
     log_tip "CF: 橙云 + Full + 放行 ${wp}/tcp"
+    if [[ "$wp" != "443" ]]; then
+      log_tip "客户端端口=${wp}（CF 同端口回源）。客户端 443→源站 ${wp} 未做 Origin Rule 会 521"
+    fi
   fi
   is_hy2_installed && log_ok "Hy2 :$(state_get HY2_PORT) hop=$(state_get HY2_HOP)"
   [[ -f "$SHARE_LINKS" ]] && log_tip "链接: cat ${SHARE_LINKS}"

@@ -30,7 +30,8 @@ curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get
 - 源站：HTTPS + 自签证书
 - CF：SSL/TLS = **Full**（非 Flexible / 非 Full strict）
 - 源站端口：`8443 2053 2083 2087 2096 443`
-- 客户端（走 CF）：域名/优选 IP · 443 · TLS · 无 flow
+- 客户端（走 CF）：域名/优选 IP · **与源站同端口**（如 8443）· TLS · 无 flow  
+  （CF 默认同端口回源；客户端写 443 而源站 8443 会 **521**。若必须客户端 443，在 CF 建 Origin Rule 把目标端口改写为源站端口）
 - 直连调试：服务器 IP · 源站端口 · TLS + allowInsecure（自签）· 无 flow
 
 ### 节点链接
