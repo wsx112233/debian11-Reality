@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.7.3"
+readonly SCRIPT_VERSION="1.7.4"
+# 终端默认不打印密钥；完整链接仅写入 ${SHARE_DIR}（chmod 600）
+# 需要明文时：菜单确认 / SHOW_SECRETS=1 / --show-secrets
+SHOW_SECRETS="${SHOW_SECRETS:-0}"
 # Cloudflare 橙云 HTTPS 回源端口（本脚本 VLESS+WS 固定 SSL=Full，源站必须 TLS）
 # https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # 优先 8443（443 常被宝塔/nginx 占用）
@@ -140,13 +143,92 @@ preflight() {
   return 0
 }
 
-# 将链接追加写入分享文件（方便 scp/cat）
+# ---------- 敏感信息脱敏（终端默认不回显密钥）----------
+# 中间打码：保留前 keep 后 keep 字符
+mask_secret() {
+  local s="${1:-}" keep="${2:-4}"
+  local n=${#s}
+  if (( n <= keep * 2 )); then
+    echo "****"
+    return 0
+  fi
+  echo "${s:0:keep}…${s: -keep}"
+}
+
+mask_uuid() {
+  local u="${1:-}"
+  # 8****-****-****-****-********abcd 风格
+  if [[ "$u" =~ ^([0-9a-fA-F]{8})-([0-9a-fA-F]{4})-([0-9a-fA-F]{4})-([0-9a-fA-F]{4})-([0-9a-fA-F]{12})$ ]]; then
+    echo "${BASH_REMATCH[1]}-****-****-****-********${BASH_REMATCH[5]: -4}"
+    return 0
+  fi
+  mask_secret "$u" 4
+}
+
+# 链接脱敏：只保留协议与 host:port 提示
+mask_link() {
+  local link="${1:-}"
+  if [[ "$link" =~ ^(vless|hysteria2|hy2)://([^@]+)@([^?/]+) ]]; then
+    echo "${BASH_REMATCH[1]}://***@${BASH_REMATCH[3]}/…(已隐藏，见本地文件)"
+    return 0
+  fi
+  echo "(链接已隐藏)"
+}
+
+secrets_enabled() {
+  [[ "${SHOW_SECRETS}" == "1" || "${SHOW_SECRETS}" == "true" || "${SHOW_SECRETS}" == "yes" ]]
+}
+
+# 需要看明文时交互确认（录屏/截图场景可拒绝）
+maybe_reveal_secrets() {
+  if secrets_enabled; then
+    return 0
+  fi
+  echo
+  log_warn "终端默认不显示 UUID / 密码 / 完整导入链接（防截图泄露）"
+  if confirm "是否在本终端临时显示完整密钥？"; then
+    SHOW_SECRETS=1
+    log_ok "已临时开启明文显示（仅本次操作）"
+  else
+    log_tip "完整内容仅写入: ${SHARE_LINKS} （root 可读 chmod 600）"
+  fi
+}
+
+emit_secret_line() {
+  # 标签 + 明文值：有权限则明文，否则脱敏
+  local label="$1" value="$2" kind="${3:-secret}"
+  if secrets_enabled; then
+    echo -e "  ${label} ${value}"
+  else
+    case "$kind" in
+      uuid) echo -e "  ${label} $(mask_uuid "$value")" ;;
+      link) echo -e "  ${label} $(mask_link "$value")" ;;
+      *)    echo -e "  ${label} $(mask_secret "$value")" ;;
+    esac
+  fi
+}
+
+emit_link_block() {
+  local title="$1" link="$2"
+  share_append_link "$title" "$link"
+  if secrets_enabled; then
+    echo -e "  ${C_CYAN}${title}${C_RESET}"
+    echo "  $link"
+    echo
+    print_qr "$link" "$title"
+  else
+    echo -e "  ${C_CYAN}${title}${C_RESET}  $(mask_link "$link")"
+  fi
+}
+
+# 将链接追加写入分享文件（chmod 600，勿提交到公开处）
 share_write_header() {
   mkdir -p "$SHARE_DIR"
   {
     echo "# VPS Proxy Manager v${SCRIPT_VERSION} · $(date '+%F %T %z')"
-    echo "# 文件: ${SHARE_LINKS}"
-    echo "# 用法: cat ${SHARE_LINKS}"
+    echo "# 敏感文件 · 权限 600 · 勿截图/勿发到公开频道"
+    echo "# 查看: sudo cat ${SHARE_LINKS}"
+    echo "# 复制到本地: scp root@服务器:${SHARE_LINKS} ."
     echo
   } > "$SHARE_LINKS"
   chmod 600 "$SHARE_LINKS"
@@ -161,12 +243,15 @@ share_append_link() {
     echo "${link}"
     echo
   } >> "$SHARE_LINKS"
+  chmod 600 "$SHARE_LINKS"
 }
 
 share_flush_notice() {
   if [[ -f "$SHARE_LINKS" ]]; then
-    log_ok "节点链接已保存"
-    log_tip "查看: cat ${SHARE_LINKS}"
+    chmod 600 "$SHARE_LINKS"
+    log_ok "完整节点链接已写入本地文件（未在上方完整打印）"
+    log_tip "sudo cat ${SHARE_LINKS}"
+    log_tip "权限: $(stat -c '%a %U:%G' "$SHARE_LINKS" 2>/dev/null || echo '600 root')"
   fi
 }
 
@@ -1254,7 +1339,7 @@ gen_xray_keys() {
   state_set "XRAY_PRIVKEY" "$priv"
   state_set "XRAY_PUBKEY" "$pub"
   state_set "XRAY_SHORTID" "$short_id"
-  log_ok "已生成 x25519 / shortId（UUID=${uuid}）"
+  log_ok "已生成 x25519 / shortId / UUID（密钥不在终端显示）"
 }
 
 # 确保 Xray UUID（REALITY / WS 共用一份 UUID 亦可，此处各自可独立）
@@ -2136,7 +2221,7 @@ install_hysteria2() {
     if [[ -n "$obfs_pass" && "${obfs_pass,,}" != "n" && "${obfs_pass,,}" != "no" ]]; then
       obfs_on="1"
       state_set "HY2_OBFS" "$obfs_pass"
-      log_ok "已启用 obfs，密码: ${obfs_pass}"
+      log_ok "已启用 Salamander obfs（密码已保存，终端不显示明文）"
     else
       state_set "HY2_OBFS" ""
     fi
@@ -2407,21 +2492,16 @@ show_xray_link() {
   ui_section "REALITY-Vision"
   print_address_summary
   echo -e "  端口     ${C_GREEN}$(state_get XRAY_PORT)${C_RESET}  ·  flow=xtls-rprx-vision"
-  echo -e "  UUID     $(state_get XRAY_UUID)"
+  emit_secret_line "UUID    " "$(state_get XRAY_UUID)" "uuid"
   echo -e "  SNI      $(state_get XRAY_SNI)"
-  echo -e "  PBK      $(state_get XRAY_PUBKEY)"
-  echo -e "  SID      $(state_get XRAY_SHORTID)  ·  fp=chrome"
+  emit_secret_line "PBK     " "$(state_get XRAY_PUBKEY)" "secret"
+  emit_secret_line "SID     " "$(state_get XRAY_SHORTID)" "secret"
+  echo -e "  fp       chrome"
   hr
-  echo -e "  ${C_CYAN}导入链接${C_RESET}"
-  echo "  $link_primary"
-  echo
-  share_append_link "REALITY" "$link_primary"
-  print_qr "$link_primary" "REALITY"
+  emit_link_block "REALITY 导入链接" "$link_primary"
   if is_ipv6 "$ip6" && is_ipv4 "$ip4"; then
     link_v4=$(build_vless_link "$ip4")
-    echo -e "  ${C_DIM}IPv4 备用:${C_RESET}"
-    echo "  $link_v4"
-    share_append_link "REALITY-IPv4" "$link_v4"
+    emit_link_block "REALITY IPv4 备用" "$link_v4"
   fi
 }
 
@@ -2441,14 +2521,14 @@ show_hy2_link() {
   print_address_summary
   echo -e "  主端口   ${C_GREEN}$(state_get HY2_PORT)/UDP${C_RESET}"
   if [[ "$(state_get HY2_HOP)" == "1" ]]; then
-    echo -e "  端口跳跃 ${C_GREEN}$(state_get HY2_HOP_START)-$(state_get HY2_HOP_END)${C_RESET} → 主端口 $(state_get HY2_PORT)（抗 QoS）"
-    echo -e "  ${C_DIM}链接格式: 主机端口=主端口，mport=跳跃段（勿写成 ip:start-end）${C_RESET}"
+    echo -e "  端口跳跃 ${C_GREEN}$(state_get HY2_HOP_START)-$(state_get HY2_HOP_END)${C_RESET} → 主端口（抗 QoS）"
+    echo -e "  ${C_DIM}链接: 主端口 + mport=段（勿写成 ip:start-end）${C_RESET}"
   else
     echo -e "  端口跳跃 ${C_DIM}未启用${C_RESET}"
   fi
-  echo -e "  密码     $(state_get HY2_PASSWORD)"
+  emit_secret_line "密码    " "$(state_get HY2_PASSWORD)" "secret"
   if [[ -n "$(state_get HY2_OBFS)" ]]; then
-    echo -e "  混淆     salamander · $(state_get HY2_OBFS)"
+    emit_secret_line "obfs    " "$(state_get HY2_OBFS)" "secret"
   else
     echo -e "  混淆     ${C_DIM}未启用${C_RESET}"
   fi
@@ -2457,19 +2537,10 @@ show_hy2_link() {
   _tier=$(state_get "HY2_TIER"); _bw=$(state_get "HY2_BW")
   [[ -n "$_tier" ]] && echo -e "  档位     ${_tier} · ${_bw:-auto}"
   hr
-  echo -e "  ${C_CYAN}导入链接（可直接粘贴）${C_RESET}"
-  echo "  $link_primary"
-  echo
-  echo -e "  ${C_DIM}无备注版:${C_RESET}"
-  echo "  ${link_primary%%#*}"
-  echo
-  share_append_link "Hysteria2" "${link_primary%%#*}"
-  print_qr "${link_primary%%#*}" "Hy2"
+  emit_link_block "Hysteria2 导入链接" "${link_primary%%#*}"
   if is_ipv6 "$ip6" && is_ipv4 "$ip4"; then
     link_v4=$(build_hy2_link "$ip4")
-    echo -e "  ${C_DIM}IPv4 备用:${C_RESET}"
-    echo "  $link_v4"
-    share_append_link "Hysteria2-IPv4" "${link_v4%%#*}"
+    emit_link_block "Hysteria2 IPv4 备用" "${link_v4%%#*}"
   fi
 }
 
@@ -2477,7 +2548,7 @@ show_ws_link() {
   if [[ "$(state_get XRAY_WS_INSTALLED)" != "1" ]]; then
     return 0
   fi
-  local host path port uuid link_cf link_direct ip4
+  local host path port uuid link_cf link_direct ip4 tip4 tip6
   host=$(state_get "XRAY_WS_HOST")
   path=$(state_get "XRAY_WS_PATH")
   port=$(state_get "XRAY_WS_PORT")
@@ -2485,26 +2556,19 @@ show_ws_link() {
   ip4=$(get_public_ipv4 2>/dev/null || true)
   link_cf=$(build_ws_link "$host")
   link_direct=$(build_ws_link "${ip4:-$host}" "direct")
-  ui_section "VLESS + WebSocket (CF)"
-  local tip4 tip6
+  ui_section "VLESS + WebSocket (CF Full)"
   tip4=$(get_public_ipv4 2>/dev/null || true)
   tip6=$(get_public_ipv6 2>/dev/null || true)
-  echo -e "  UUID     ${uuid}"
-  echo -e "  源站     ${C_GREEN}https :${port}${C_RESET}${path}  ${C_DIM}(CF HTTPS 端口)${C_RESET}"
-  echo -e "  Host/SNI ${C_GREEN}${host}${C_RESET}  ${C_DIM}(必须是域名，不是 IP)${C_RESET}"
-  echo -e "  客户端   地址=域名或 CF 优选 IP · 443 · TLS · 无 flow"
-  echo -e "  CF SSL   ${C_YELLOW}${C_BOLD}Full${C_RESET} · 橙云 · 安全组 ${port}/tcp · 源站自签"
+  emit_secret_line "UUID    " "$uuid" "uuid"
+  echo -e "  源站     ${C_GREEN}https :${port}${C_RESET}${path}"
+  echo -e "  Host/SNI ${C_GREEN}${host}${C_RESET}"
+  echo -e "  客户端   域名或优选 IP · 443 · TLS · 无 flow"
+  echo -e "  CF SSL   ${C_YELLOW}${C_BOLD}Full${C_RESET} · 橙云 · 安全组 ${port}/tcp"
   [[ -n "$tip4" ]] && echo -e "  ${C_DIM}DNS A    → ${tip4}${C_RESET}"
-  [[ -n "$tip6" ]] && echo -e "  ${C_DIM}DNS AAAA → ${tip6}  (仅 IPv6 解析时用这条)${C_RESET}"
+  [[ -n "$tip6" ]] && echo -e "  ${C_DIM}DNS AAAA → ${tip6}${C_RESET}"
   hr
-  echo -e "  ${C_CYAN}经 CF（地址可改为优选 IP）${C_RESET}"
-  echo "  $link_cf"
-  echo
-  share_append_link "VLESS-WS-CF" "$link_cf"
-  print_qr "$link_cf" "VLESS-WS"
-  echo -e "  ${C_DIM}直连源站调试:${C_RESET}"
-  echo "  $link_direct"
-  share_append_link "VLESS-WS-direct" "$link_direct"
+  emit_link_block "VLESS-WS-CF" "$link_cf"
+  emit_link_block "VLESS-WS-direct(调试)" "$link_direct"
 }
 
 show_all_links() {
@@ -2518,11 +2582,19 @@ show_all_links() {
     log_tip "主菜单选 [1] 安装"
     return 0
   fi
+  # 非 SHOW_SECRETS=1 时询问是否明文（默认否）
+  if [[ "${1:-}" != "quiet" ]]; then
+    maybe_reveal_secrets
+  fi
   share_write_header
   show_xray_link
   show_ws_link
   show_hy2_link
   share_flush_notice
+  if ! secrets_enabled; then
+    echo
+    log_tip "需要明文: SHOW_SECRETS=1 sudo bash $0 --links   或菜单 [3] 时选 y"
+  fi
 }
 
 # 一键诊断：本机监听 / 服务 / 常见 CF 坑提示
@@ -2699,6 +2771,8 @@ menu_install() {
     esac
   done
   log_ok "计划安装: ${C_BOLD}${names}${C_RESET}"
+  log_tip "安装过程默认不在终端打印完整密钥，链接写入 ${SHARE_LINKS}"
+  SHOW_SECRETS=0
   share_write_header
   t0=$(date +%s)
   for p in $picks; do
@@ -2829,18 +2903,21 @@ usage() {
   cat <<EOF
 用法: sudo $0 [选项]
 
-  (无参数)     交互菜单
-  -h, --help  帮助
-  -v          版本
-  --status    组件状态
-  --diagnose  连通诊断后退出
-  --links     打印并导出节点链接后退出
+  (无参数)          交互菜单
+  -h, --help       帮助
+  -v               版本
+  --status         组件状态（无密钥）
+  --diagnose       连通诊断（无密钥）
+  --links          导出链接到文件（终端默认脱敏）
+  --show-secrets   与 --links 联用：终端打印完整密钥
+  SHOW_SECRETS=1   环境变量：允许终端明文
+
+隐私:
+  完整导入链接仅写入 ${SHARE_LINKS} (chmod 600)
+  请勿把该文件内容发到公开群/截图
 
 一行安装:
   curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get | sudo bash
-
-沙盒 ${SANDBOX_ROOT}
-分享 ${SHARE_LINKS}
 EOF
 }
 
@@ -2853,35 +2930,50 @@ print_status_once() {
 }
 
 main() {
-  case "${1:-}" in
-    -h|--help) usage; exit 0 ;;
-    -v|--version) echo "proxy_manager.sh ${SCRIPT_VERSION}"; exit 0 ;;
-    --status)
-      check_root; check_debian; ensure_sandbox
-      print_status_once
-      exit 0
-      ;;
-    --diagnose)
-      check_root; check_debian; ensure_sandbox
-      run_diagnose
-      exit 0
-      ;;
-    --links)
-      check_root; check_debian; ensure_sandbox
-      show_all_links
-      exit 0
-      ;;
-    "")
-      ;;
-    *)
-      log_err "未知参数: $1"
-      usage
-      exit 1
-      ;;
-  esac
+  local do_links=0 do_status=0 do_diag=0
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -h|--help) usage; exit 0 ;;
+      -v|--version) echo "proxy_manager.sh ${SCRIPT_VERSION}"; exit 0 ;;
+      --show-secrets) SHOW_SECRETS=1 ;;
+      --links) do_links=1 ;;
+      --status) do_status=1 ;;
+      --diagnose) do_diag=1 ;;
+      "") ;;
+      *)
+        if [[ -n "$a" ]]; then
+          log_err "未知参数: $a"
+          usage
+          exit 1
+        fi
+        ;;
+    esac
+  done
+
   check_root
   check_debian
   ensure_sandbox
+
+  if [[ $do_status -eq 1 ]]; then
+    print_status_once
+    exit 0
+  fi
+  if [[ $do_diag -eq 1 ]]; then
+    run_diagnose
+    exit 0
+  fi
+  if [[ $do_links -eq 1 ]]; then
+    # 默认脱敏；加 --show-secrets 才终端明文
+    if secrets_enabled; then
+      show_all_links
+    else
+      show_all_links quiet
+    fi
+    exit 0
+  fi
+
+  # 无参数：交互菜单（安装时强制脱敏，看节点时再询问）
   preflight || true
   main_loop
 }

@@ -45,8 +45,16 @@ curl -fsSL https://raw.githubusercontent.com/wsx112233/debian11-Reality/main/get
 ```bash
 sudo bash proxy_manager.sh --status
 sudo bash proxy_manager.sh --diagnose
-sudo bash proxy_manager.sh --links
+sudo bash proxy_manager.sh --links              # 导出到文件，终端脱敏
+SHOW_SECRETS=1 sudo bash proxy_manager.sh --links --show-secrets  # 终端明文（慎用）
 ```
+
+## 隐私
+
+- 终端**默认不显示** UUID / 密码 / PBK / 完整导入链接 / 二维码明文
+- 完整内容写入：`/etc/vps_proxy_mgr/share/client-links.txt`（`chmod 600`）
+- 查看：`sudo cat /etc/vps_proxy_mgr/share/client-links.txt`
+- 菜单 [3] 可选择是否临时在终端显示明文
 
 ## License
 
