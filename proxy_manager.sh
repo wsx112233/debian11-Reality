@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.8.4"
+readonly SCRIPT_VERSION="1.8.5"
 # Cloudflare 橙云 HTTPS 回源端口（本脚本 VLESS+WS 固定 SSL=Full，源站必须 TLS）
 # https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # 优先 8443（443 常被宝塔/nginx 占用）
@@ -2286,7 +2286,8 @@ Telegram 加速（随协议静默安装）
 2. 客户端请将下列域名与 ${f} 中 CIDR 走代理：
    telegram.org, t.me, td.telegram.org, telegra.ph,
    *.telegram.org, *.t.me
-3. 使用 VLESS+WS + Cloudflare 时：客户端地址填 CF 优选 IP，
+3. 使用 VLESS+WS + Cloudflare 时：客户端地址填 CF 优选 IP 或域名，
+   端口必须与源站相同（state 中 XRAY_WS_PORT，常见 8443，勿默认 443），
    Host/SNI 填你的域名，path 与面板一致。
 4. 本脚本不劫持系统路由、不改 resolv.conf、不装 WARP。
 5. 全部协议卸载后，上述文件与 sysctl 片段会一并删除。
@@ -2418,34 +2419,34 @@ build_hy2_link() {
   echo "hysteria2://${pass}@${host}:${port}?${qs}#${name}"
 }
 
-# VLESS+WS 链接：地址可用 CF 优选 IP；Host/SNI 用域名
-# $1=连接地址(可优选IP)  缺省用域名 Host
-# $2=direct → 源站直连（TLS 自签 + allowInsecure）
-# 否则走 CF：客户端端口必须与源站端口相同（CF 同端口回源；源站 8443 时客户端不能写 443，否则 521）
+# VLESS+WS 链接端口规则（唯一规则，禁止写死 443）：
+#   客户端 port ≡ state XRAY_WS_PORT ≡ 源站监听端口（CF 默认同端口回源）
+# $1=连接地址(域名/优选IP/服务器IP)  缺省=Host 域名
+# $2=direct → 源站直连（TLS 自签 + allowInsecure）；否则走 CF 边缘 TLS
 build_ws_link() {
-  local addr host_hdr path port uuid name enc_path enc_host
+  local addr host_hdr path port uuid name enc_path enc_host h mode
   addr="${1:-}"
+  mode="${2:-cf}"
   host_hdr=$(state_get "XRAY_WS_HOST")
   path=$(state_get "XRAY_WS_PATH")
   port=$(state_get "XRAY_WS_PORT")
   uuid=$(state_get "XRAY_UUID")
   [[ -z "$addr" ]] && addr="$host_hdr"
-  # CF：地址=域名/优选IP · 端口=源站端口 · TLS(CF 正式证) · sni/host=域名
-  # 直连：地址=服务器IP · 源站端口 · TLS(自签) · allowInsecure=1
-  # 若坚持客户端 443、源站 8443：须在 CF 建 Origin Rule 改写目标端口 → 8443
+  [[ -n "$host_hdr" && -n "$path" && -n "$uuid" ]] || die "VLESS+WS 状态不完整，无法生成链接"
+  # 端口必须来自安装时写入的源站端口；空/非数字则失败，绝不回退 443
+  if [[ -z "$port" || ! "$port" =~ ^[0-9]+$ || "$port" -lt 1 || "$port" -gt 65535 ]]; then
+    die "XRAY_WS_PORT 无效（${port:-空}），请重装 VLESS+WS 或检查 state.env"
+  fi
   enc_path=$(urlencode "$path")
   enc_host=$(urlencode "$host_hdr")
-  name=$(urlencode "VLESS-WS-CF")
-  if [[ -n "${2:-}" && "$2" == "direct" ]]; then
-    local h
-    h=$(format_host_for_uri "$addr")
+  h=$(format_host_for_uri "$addr")
+  if [[ "$mode" == "direct" ]]; then
     name=$(urlencode "VLESS-WS-direct")
-    # 源站固定 Full HTTPS 自签，客户端必须 tls + 跳过证书校验
+    # 直连：IP:源站端口 · TLS 自签 · allowInsecure
     echo "vless://${uuid}@${h}:${port}?encryption=none&security=tls&type=ws&host=${enc_host}&path=${enc_path}&sni=${enc_host}&fp=chrome&allowInsecure=1#${name}"
   else
-    local h
-    h=$(format_host_for_uri "$addr")
-    # 与源站同端口，避免 CF 默认回源 443 导致 521
+    name=$(urlencode "VLESS-WS-CF")
+    # CF：域名或优选IP:源站端口（与回源端口一致）· CF 正式证书 · insecure=0
     echo "vless://${uuid}@${h}:${port}?encryption=none&security=tls&type=ws&host=${enc_host}&path=${enc_path}&sni=${enc_host}&fp=chrome#${name}"
   fi
 }
@@ -2542,12 +2543,13 @@ show_ws_link() {
   tip6=$(get_public_ipv6 2>/dev/null || true)
   emit_line "UUID    " "$uuid"
   emit_line "源站    " "https :${port}${path}"
+  emit_line "链接端口" "${port}（CF/直连均用此端口，= 源站监听）"
   emit_line "Host/SNI" "$host"
-  emit_line "客户端  " "域名/优选IP · ${port} · TLS · 无 flow（与源站同端口）"
+  emit_line "客户端  " "域名/优选IP · ${port} · TLS · 无 flow"
   emit_line "直连调试" "IP:${port} · TLS · allowInsecure · 无 flow"
   emit_line "CF SSL  " "Full · 橙云 · 安全组 ${port}/tcp"
   if [[ "$port" != "443" ]]; then
-    emit_line "注意    " "勿写客户端 443（会 521）；要用 443 请建 Origin Rule→${port}"
+    emit_line "注意    " "链接端口=${port} 非 443；强行改 443 会 521（除非 Origin Rule→${port}）"
   fi
   [[ -n "$tip4" ]] && emit_line "DNS A   " "$tip4"
   [[ -n "$tip6" ]] && emit_line "DNS AAAA" "$tip6"
