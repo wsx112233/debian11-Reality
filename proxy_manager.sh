@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly SCRIPT_VERSION="1.8.2"
+readonly SCRIPT_VERSION="1.8.3"
 # Cloudflare 橙云 HTTPS 回源端口（本脚本 VLESS+WS 固定 SSL=Full，源站必须 TLS）
 # https://developers.cloudflare.com/fundamentals/reference/network-ports/
 # 优先 8443（443 常被宝塔/nginx 占用）
@@ -2417,6 +2417,7 @@ build_hy2_link() {
 
 # VLESS+WS 链接：地址可用 CF 优选 IP；Host/SNI 用域名
 # $1=连接地址(可优选IP)  缺省用域名 Host
+# $2=direct → 源站直连（TLS 自签 + allowInsecure）；否则走 CF 443
 build_ws_link() {
   local addr host_hdr path port uuid name enc_path enc_host
   addr="${1:-}"
@@ -2425,17 +2426,17 @@ build_ws_link() {
   port=$(state_get "XRAY_WS_PORT")
   uuid=$(state_get "XRAY_UUID")
   [[ -z "$addr" ]] && addr="$host_hdr"
-  # 客户端经 CF：地址=优选IP，端口=443，security=tls，sni/host=域名
-  # 源站直连调试：地址=服务器IP，端口=源站端口，security=none
+  # CF：地址=域名/优选IP · 443 · TLS(正式证) · sni/host=域名
+  # 直连：地址=服务器IP · 源站端口 · TLS(自签) · allowInsecure=1 · sni/host=域名
   enc_path=$(urlencode "$path")
   enc_host=$(urlencode "$host_hdr")
   name=$(urlencode "VLESS-WS-CF")
-  # 默认生成「走 CF 443 TLS」形态（优选 IP 场景）
   if [[ -n "${2:-}" && "$2" == "direct" ]]; then
     local h
     h=$(format_host_for_uri "$addr")
     name=$(urlencode "VLESS-WS-direct")
-    echo "vless://${uuid}@${h}:${port}?encryption=none&security=none&type=ws&host=${enc_host}&path=${enc_path}#${name}"
+    # 源站固定 Full HTTPS 自签，客户端必须 tls + 跳过证书校验
+    echo "vless://${uuid}@${h}:${port}?encryption=none&security=tls&type=ws&host=${enc_host}&path=${enc_path}&sni=${enc_host}&fp=chrome&allowInsecure=1#${name}"
   else
     local h
     h=$(format_host_for_uri "$addr")
@@ -2536,7 +2537,8 @@ show_ws_link() {
   emit_line "UUID    " "$uuid"
   emit_line "源站    " "https :${port}${path}"
   emit_line "Host/SNI" "$host"
-  emit_line "客户端  " "域名或优选IP · 443 · TLS · 无 flow"
+  emit_line "客户端  " "域名/优选IP · 443 · TLS · 无 flow"
+  emit_line "直连调试" "IP:${port} · TLS · allowInsecure · 无 flow"
   emit_line "CF SSL  " "Full · 橙云 · 安全组 ${port}/tcp"
   [[ -n "$tip4" ]] && emit_line "DNS A   " "$tip4"
   [[ -n "$tip6" ]] && emit_line "DNS AAAA" "$tip6"
